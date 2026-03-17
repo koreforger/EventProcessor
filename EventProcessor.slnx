@@ -1,0 +1,8 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/EventProcessor/EventProcessor.csproj" />
+  </Folder>
+  <Folder Name="/tools/">
+    <!-- <Project Path="tools/TestPublisher/TestPublisher.csproj" /> -->
+  </Folder>
+</Solution>

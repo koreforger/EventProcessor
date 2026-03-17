@@ -1,0 +1,27 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="KoreForge.Time" Version="0.0.2-alpha" />
+    <PackageReference Include="KoreForge.Logging" Version="0.0.2-alpha" />
+    <PackageReference Include="KoreForge.Logging.Serilog" Version="0.0.2-alpha" />
+    <PackageReference Include="KoreForge.Jex" Version="0.0.2-alpha" />
+    <PackageReference Include="KoreForge.AppLifecycle" Version="0.0.2-alpha" />
+    <PackageReference Include="KoreForge.Metrics" Version="0.0.2-alpha" />
+    <PackageReference Include="KoreForge.Metrics.AspNet" Version="0.0.2-alpha" />
+    <PackageReference Include="KoreForge.Processing" Version="0.0.2-alpha" />
+    <PackageReference Include="KoreForge.Settings" Version="0.0.2-alpha" />
+    <PackageReference Include="KoreForge.Kafka" Version="0.0.2-alpha" />
+    <PackageReference Include="KoreForge.Web.RestApi.Abstractions" Version="0.0.2-alpha" />
+    <PackageReference Include="KoreForge.Web.RestApi.Observability" Version="0.0.2-alpha" />
+    <PackageReference Include="KoreForge.Web.RestApi.Persistence" Version="0.0.2-alpha" />
+    <PackageReference Include="KoreForge.Web.Authorization" Version="0.0.2-alpha" />
+  </ItemGroup>
+
+</Project>

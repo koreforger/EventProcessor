@@ -1,0 +1,91 @@
+services:
+  # Development container
+  devcontainer:
+    image: mcr.microsoft.com/devcontainers/dotnet:1-9.0
+    container_name: eventprocessor-dev
+    volumes:
+      - ..:/workspace:cached
+    command: sleep infinity
+    depends_on:
+      redpanda:
+        condition: service_healthy
+      sqledge:
+        condition: service_healthy
+    networks:
+      - fraudnet
+
+  # Redpanda (Kafka-compatible message broker)
+  redpanda:
+    image: redpandadata/redpanda:v24.1.2
+    container_name: eventprocessor-redpanda
+    command:
+      - redpanda
+      - start
+      - --overprovisioned
+      - --smp
+      - "1"
+      - --memory
+      - 1G
+      - --reserve-memory
+      - 0M
+      - --node-id
+      - "1"
+      - --check=false
+      - --kafka-addr
+      - internal://0.0.0.0:9092,external://0.0.0.0:29092
+      - --advertise-kafka-addr
+      - internal://redpanda:9092,external://localhost:29092
+    ports:
+      - "29092:29092"
+      - "9644:9644"
+    volumes:
+      - redpanda_data:/var/lib/redpanda/data
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster info > /dev/null 2>&1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - fraudnet
+
+  # Azure SQL Edge (SQL Server compatible)
+  sqledge:
+    image: mcr.microsoft.com/azure-sql-edge:latest
+    container_name: eventprocessor-sqledge
+    environment:
+      ACCEPT_EULA: "1"
+      MSSQL_SA_PASSWORD: "FraudEngine!Pass123"
+    ports:
+      - "14333:1433"
+    volumes:
+      - sqledge_data:/var/opt/mssql
+      - ./sql:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/mssql-tools/bin/sqlcmd -S localhost -U sa -P FraudEngine!Pass123 -Q 'SELECT 1' > /dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - fraudnet
+
+  # Redpanda Console (optional UI for Kafka)
+  console:
+    image: redpandadata/console:v2.4.5
+    container_name: eventprocessor-console
+    ports:
+      - "8080:8080"
+    environment:
+      KAFKA_BROKERS: redpanda:29092
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    networks:
+      - fraudnet
+
+volumes:
+  redpanda_data:
+  sqledge_data:
+
+networks:
+  fraudnet:
+    driver: bridge

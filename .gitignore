@@ -1,0 +1,21 @@
+# Build outputs
+bin/
+obj/
+artifacts/
+
+# IDE / User settings
+*.user
+*.suo
+.vs/
+.vscode/
+
+# Node
+dashboard/node_modules/
+dashboard/dist/
+dashboard/.vite/
+
+# Secrets / overrides
+appsettings.Production.json
+
+# Generated output
+*.cache
