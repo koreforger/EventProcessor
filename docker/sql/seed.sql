@@ -46,11 +46,23 @@ EXEC #UpsertSetting 'EventProcessor', 'Kafka:Clusters:local:ConfluentOptions:cli
 EXEC #UpsertSetting 'EventProcessor', 'Kafka:Profiles:Default:Type',                        'Consumer',     NULL;
 EXEC #UpsertSetting 'EventProcessor', 'Kafka:Profiles:Default:Cluster',                     'local',        NULL;
 EXEC #UpsertSetting 'EventProcessor', 'Kafka:Profiles:Default:Topics:0',                    'fraud.transactions', 'Primary input topic';
-EXEC #UpsertSetting 'EventProcessor', 'Kafka:Profiles:Default:ExtendedConsumer:ConsumerCount',    '1',      NULL;
+EXEC #UpsertSetting 'EventProcessor', 'Kafka:Profiles:Default:ExtendedConsumer:ConsumerCount',    '4',      NULL;  -- match topic partition count
 EXEC #UpsertSetting 'EventProcessor', 'Kafka:Profiles:Default:ExtendedConsumer:StartMode',        'Earliest', NULL;
 EXEC #UpsertSetting 'EventProcessor', 'Kafka:Profiles:Default:ExtendedConsumer:MaxBatchSize',     '500',    NULL;
-EXEC #UpsertSetting 'EventProcessor', 'Kafka:Profiles:Default:ExtendedConsumer:MaxBatchWaitMs',   '1000',   NULL;
-EXEC #UpsertSetting 'EventProcessor', 'Kafka:Profiles:Default:ExtendedConsumer:MaxInFlightBatches','4',     NULL;
+EXEC #UpsertSetting 'EventProcessor', 'Kafka:Profiles:Default:ExtendedConsumer:MaxBatchWaitMs',   '50',     NULL;  -- 50ms: don't stall when messages are available
+EXEC #UpsertSetting 'EventProcessor', 'Kafka:Profiles:Default:ExtendedConsumer:MaxInFlightBatches','16',    NULL;  -- 4 consumers × 4 slots each
+EXEC #UpsertSetting 'EventProcessor', 'Kafka:Profiles:Default:ExtendedConsumer:PollTimeoutMs',        '10',   NULL;  -- 10ms poll: keep latency low with a full backlog
+EXEC #UpsertSetting 'EventProcessor', 'Kafka:Profiles:Default:ExtendedConsumer:PipelineMaxDegreeOfParallelism','4', NULL;  -- process 4 records per batch concurrently
+
+-- =============================================================================
+-- FraudEngine Kafka (direct consumer/producer config for FraudEngineOptions)
+-- =============================================================================
+
+EXEC #UpsertSetting 'EventProcessor', 'FraudEngine:Kafka:Consumer:BootstrapServers', 'localhost:29092',         'Redpanda broker for FraudEngine consumer';
+EXEC #UpsertSetting 'EventProcessor', 'FraudEngine:Kafka:Consumer:GroupId',          'fraud-engine-dev',        'Consumer group ID';
+EXEC #UpsertSetting 'EventProcessor', 'FraudEngine:Kafka:Consumer:Topics:0',         'fraud.transactions',      'Primary input topic';
+EXEC #UpsertSetting 'EventProcessor', 'FraudEngine:Kafka:Consumer:AutoOffsetReset',  'earliest',                NULL;
+EXEC #UpsertSetting 'EventProcessor', 'FraudEngine:Kafka:Producer:BootstrapServers', 'localhost:29092',         'Redpanda broker for FraudEngine producer';
 
 -- =============================================================================
 -- FraudEngine Processing

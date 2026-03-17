@@ -32,7 +32,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, watch } from 'vue'
 import {
   DxChart,
   DxSeries,
@@ -55,14 +55,42 @@ const props = defineProps<{
   mode: 'counter' | 'rate'
 }>()
 
-const chartData = computed(() => {
-  return props.snapshots.map((s) => ({
+function toPoint(s: MetricsSnapshot) {
+  return {
     time: new Date(s.timestamp),
     value: props.mode === 'rate'
       ? (s.rates[props.metricKey + '.rate'] ?? 0)
       : (s.counters[props.metricKey] ?? 0),
-  }))
-})
+  }
+}
+
+// chartData is a plain array managed as a ring buffer.
+// We mutate it in-place so DevExtreme sees incremental changes rather than
+// a full data source replacement — this eliminates the full-redraw flicker.
+const chartData: Array<{ time: Date; value: number }> = []
+
+// Seed from whatever snapshots exist at mount time.
+props.snapshots.forEach(s => chartData.push(toPoint(s)))
+
+// Watch the snapshots array length; when a new item is appended, push it.
+// When the buffer overflows (splice happened), rebuild — but that's rare
+// (only every 5 min).
+watch(
+  () => props.snapshots.length,
+  (newLen, oldLen) => {
+    if (newLen > oldLen) {
+      // Normal case: one new snapshot appended.
+      chartData.push(toPoint(props.snapshots[newLen - 1]))
+      // Mirror the ring-buffer trim on the chart side.
+      if (chartData.length > newLen) {
+        chartData.splice(0, chartData.length - newLen)
+      }
+    } else {
+      // Buffer was trimmed (length shrank) — rebuild from scratch.
+      chartData.splice(0, chartData.length, ...props.snapshots.map(toPoint))
+    }
+  }
+)
 
 const latestValue = computed(() => {
   if (props.snapshots.length === 0) return '—'
@@ -100,3 +128,4 @@ const latestValue = computed(() => {
   font-weight: 700;
 }
 </style>
+

@@ -28,11 +28,11 @@
       <DxPager :show-page-size-selector="true" :allowed-page-sizes="[25, 50, 100]" />
 
       <DxColumn
-        data-field="key"
-        caption="Key"
-        :width="400"
+        name="keyGroup"
+        caption="Group"
         :group-index="0"
-        :calculate-group-value="groupByPrefix"
+        :calculate-cell-value="groupByPrefix"
+        :visible="false"
       />
       <DxColumn data-field="key" caption="Setting" :min-width="250" />
       <DxColumn data-field="databaseValue" caption="Database Value" :min-width="200" />

@@ -1,72 +1,53 @@
-using System.Collections.Concurrent;
-using System.Diagnostics.Metrics;
 using EventProcessor.Hubs;
+using KF.Metrics;
+using KF.Time;
 
 namespace EventProcessor.Services;
 
 /// <summary>
-/// Subscribes to the "EventProcessor" Meter via MeterListener and accumulates
-/// counter/gauge values for on-demand snapshot retrieval.
+/// Adapts the KoreForge <see cref="IMonitoringSnapshotProvider"/> to the
+/// <see cref="MetricsSnapshot"/> contract expected by the SignalR dashboard.
+/// All operation timing and counting is performed by the KoreForge metrics engine;
+/// this class only translates the representation.
 /// </summary>
-public sealed class MetricsCollector : IDisposable
+public sealed class MetricsCollector
 {
-    private readonly MeterListener _listener = new();
-    private readonly ConcurrentDictionary<string, long> _counters = new();
-    private readonly ConcurrentDictionary<string, double> _gauges = new();
-    private readonly ConcurrentDictionary<string, long> _prevCounters = new();
-    private bool _disposed;
+    private readonly IMonitoringSnapshotProvider _snapshotProvider;
+    private readonly ISystemClock _clock;
 
-    public MetricsCollector()
+    public MetricsCollector(IMonitoringSnapshotProvider snapshotProvider, ISystemClock clock)
     {
-        _listener.InstrumentPublished = (instrument, listener) =>
-        {
-            if (instrument.Meter.Name == "EventProcessor")
-                listener.EnableMeasurementEvents(instrument);
-        };
-
-        _listener.SetMeasurementEventCallback<long>((instrument, value, _, _) =>
-            _counters.AddOrUpdate(instrument.Name, value, (_, prev) => prev + value));
-
-        _listener.SetMeasurementEventCallback<int>((instrument, value, _, _) =>
-            _counters.AddOrUpdate(instrument.Name, value, (_, prev) => prev + value));
-
-        _listener.SetMeasurementEventCallback<double>((instrument, value, _, _) =>
-            _gauges[instrument.Name] = value);
-
-        _listener.Start();
+        _snapshotProvider = snapshotProvider;
+        _clock = clock;
     }
 
-    /// <summary>
-    /// Returns a snapshot of the current counter, gauge, and rate values.
-    /// Rates are computed as delta-per-second since the last snapshot call.
-    /// </summary>
+    /// <summary>Returns a dashboard-ready snapshot of all recorded operations.</summary>
     public MetricsSnapshot GetSnapshot()
     {
-        var counters = new Dictionary<string, long>(_counters);
-        var gauges = new Dictionary<string, double>(_gauges);
+        var monitoring = _snapshotProvider.GetSnapshot();
+
+        var counters = new Dictionary<string, long>();
+        var gauges = new Dictionary<string, double>();
         var rates = new Dictionary<string, double>();
 
-        foreach (var kvp in counters)
+        foreach (var op in monitoring.Operations)
         {
-            var prev = _prevCounters.GetValueOrDefault(kvp.Key, 0);
-            var delta = kvp.Value - prev;
-            rates[kvp.Key + ".rate"] = delta; // per snapshot interval (1s)
-            _prevCounters[kvp.Key] = kvp.Value;
+            counters[$"{op.Name}.total"]   = op.TotalCount;
+            counters[$"{op.Name}.success"] = op.TotalCount - op.TotalFailures;
+            counters[$"{op.Name}.failure"] = op.TotalFailures;
+            gauges[$"{op.Name}.in_flight"] = op.CurrentInFlight;
+            gauges[$"{op.Name}.avg_ms"]    = op.CurrentAverageDuration.TotalMilliseconds;
+            gauges[$"{op.Name}.max_ms"]    = op.CurrentMaxDuration.TotalMilliseconds;
+            rates[$"{op.Name}.rate"]       = op.CurrentRatePerSecond;
         }
 
         return new MetricsSnapshot
         {
-            Timestamp = DateTime.UtcNow,
+            Timestamp = monitoring.GeneratedAt,
             Counters = counters,
             Gauges = gauges,
             Rates = rates
         };
     }
-
-    public void Dispose()
-    {
-        if (_disposed) return;
-        _disposed = true;
-        _listener.Dispose();
-    }
 }
+

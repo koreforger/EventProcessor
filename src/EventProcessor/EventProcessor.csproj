@@ -12,6 +12,12 @@
     <SolutionDir Condition="'$(SolutionDir)' == '' or '$(SolutionDir)' == '*Undefined*'">$(MSBuildProjectDirectory)\..\..\</SolutionDir>
   </PropertyGroup>
 
+  <ItemGroup>
+    <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleToAttribute">
+      <_Parameter1>EventProcessor.Tests</_Parameter1>
+    </AssemblyAttribute>
+  </ItemGroup>
+
   <!-- KoreForge NuGet packages -->
   <ItemGroup>
     <PackageReference Include="KoreForge.Time" Version="0.0.2-alpha" />
@@ -23,7 +29,8 @@
     <PackageReference Include="KoreForge.Metrics.AspNet" Version="0.0.2-alpha" />
     <PackageReference Include="KoreForge.Processing" Version="0.0.2-alpha" />
     <PackageReference Include="KoreForge.Settings" Version="0.0.2-alpha" />
-    <PackageReference Include="KoreForge.Kafka" Version="0.0.2-alpha" />
+    <PackageReference Include="KoreForge.Kafka" Version="0.0.4-alpha" />
+    <PackageReference Include="KoreForge.Web.HealthChecks" Version="0.0.3-alpha" />
     <PackageReference Include="KoreForge.Web.RestApi.Abstractions" Version="0.0.2-alpha" />
     <PackageReference Include="KoreForge.Web.RestApi.Observability" Version="0.0.2-alpha" />
     <PackageReference Include="KoreForge.Web.RestApi.Persistence" Version="0.0.2-alpha" />

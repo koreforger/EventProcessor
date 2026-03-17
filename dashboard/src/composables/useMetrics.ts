@@ -4,18 +4,22 @@ import type { MetricsSnapshot } from '../types'
 
 const BUFFER_SIZE = 300 // 5 minutes at 1 snapshot/sec
 
-export function useMetrics() {
-  const snapshots = ref<MetricsSnapshot[]>([])
-  const latest = computed(() => snapshots.value[snapshots.value.length - 1] ?? null)
-  const loading = ref(true)
+// Module-level shared state — all callers share the same buffer.
+const snapshots = ref<MetricsSnapshot[]>([])
+const latest = computed(() => snapshots.value[snapshots.value.length - 1] ?? null)
+let initialLoaded = false
 
+export function useMetrics() {
+  const loading = ref(!initialLoaded)
   const { start, on } = useSignalR('/hub/metrics')
 
   async function loadInitial() {
+    if (initialLoaded) return
     try {
       const res = await fetch('/api/metrics')
       const snapshot: MetricsSnapshot = await res.json()
       snapshots.value.push(snapshot)
+      initialLoaded = true
     } catch {
       // Will populate via SignalR
     } finally {
@@ -27,10 +31,11 @@ export function useMetrics() {
     await loadInitial()
 
     on<MetricsSnapshot>('MetricsSnapshot', (snapshot) => {
+      // Mutate the array in-place: push new, shift old when over limit.
+      // Keeping the same array reference prevents full chart redraws.
       snapshots.value.push(snapshot)
-      // Ring buffer — drop oldest when over size
       if (snapshots.value.length > BUFFER_SIZE) {
-        snapshots.value = snapshots.value.slice(-BUFFER_SIZE)
+        snapshots.value.splice(0, snapshots.value.length - BUFFER_SIZE)
       }
     })
 
@@ -39,3 +44,4 @@ export function useMetrics() {
 
   return { snapshots, latest, loading }
 }
+

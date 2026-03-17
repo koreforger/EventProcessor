@@ -1,25 +1,31 @@
 using EventProcessor.Configuration;
+using EventProcessor.HealthChecks;
 using EventProcessor.Services;
 using EventProcessor.Workers;
 using KF.Kafka.Configuration.Extensions;
+using KF.Metrics;
+using KF.Time;
 using KoreForge.Jex;
+using Microsoft.Extensions.Options;
 
 namespace EventProcessor;
 
-/// <summary>
-/// Extension methods for configuring EventProcessor services.
-/// </summary>
 public static class ServiceCollectionExtensions
 {
-    /// <summary>
-    /// Adds EventProcessor services to the DI container.
-    /// </summary>
     public static IServiceCollection AddKafkaProcessor(
         this IServiceCollection services,
         IConfiguration configuration)
     {
-        // Health checks
-        services.AddHealthChecks();
+        // Health checks — each integration registers its own check via IHealthChecksBuilder
+        // extension methods defined in HealthCheckExtensions.cs.
+        services.AddHealthChecks()
+            .AddKafkaConsumerHealthCheck();
+
+        // KoreForge observability: IOperationMonitor + IMonitoringSnapshotProvider
+        services.AddKoreForgeMetrics();
+
+        // Deterministic clock abstraction
+        services.AddSingleton<ISystemClock>(UtcSystemClock.Instance);
 
         // KoreForge Kafka configuration (reads from "Kafka" config section by default)
         services.AddKafkaConfiguration(configuration);
@@ -30,24 +36,21 @@ public static class ServiceCollectionExtensions
         // JEX-based field extractor
         services.AddSingleton<JexFieldExtractorService>();
 
-        // Kafka batch processor (processes each batch through JEX extraction)
-        services.AddSingleton<TransactionBatchProcessor>();
-
-        // Kafka consumer hosted service (wraps KafkaConsumerHost)
+        // Kafka consumer hosted service + processing pipeline
         services.AddHostedService<TransactionConsumerWorker>();
 
         // Fraud rule engine
         services.AddSingleton<IFraudRuleEngine, SimpleFraudRuleEngine>();
 
-        // Bind FraudEngine options from config
-        services.Configure<FraudEngineOptions>(configuration.GetSection("FraudEngine"));
+        // Bind and validate FraudEngine options at startup
+        services.AddOptions<FraudEngineOptions>()
+            .BindConfiguration("FraudEngine")
+            .ValidateOnStart();
+        services.AddSingleton<IValidateOptions<FraudEngineOptions>, FraudEngineOptionsValidator>();
 
         return services;
     }
 
-    /// <summary>
-    /// Adds dashboard services: SignalR, CORS, metrics collection, settings monitoring.
-    /// </summary>
     public static IServiceCollection AddDashboard(this IServiceCollection services)
     {
         // CORS for Vite dev server
@@ -69,8 +72,7 @@ public static class ServiceCollectionExtensions
         services.AddSingleton<MetricsCollector>();
         services.AddHostedService<MetricsBroadcaster>();
 
-        // Settings monitoring (SqlSettingsOptions singleton from config bootstrap)
-        services.AddSingleton(SqlSettingsOptionsHolder.Instance);
+        // Settings monitoring (subscribes to IConfiguration reload tokens)
         services.AddSingleton<SettingsMonitor>();
         services.AddHostedService(sp => sp.GetRequiredService<SettingsMonitor>());
 

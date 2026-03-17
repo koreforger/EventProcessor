@@ -5,7 +5,8 @@ namespace EventProcessor.Hubs;
 /// </summary>
 public sealed class MetricsSnapshot
 {
-    public DateTime Timestamp { get; init; } = DateTime.UtcNow;
+    /// <summary>Set by the caller; never defaulted here — use ISystemClock.</summary>
+    public DateTimeOffset Timestamp { get; init; }
     public Dictionary<string, long> Counters { get; init; } = new();
     public Dictionary<string, double> Gauges { get; init; } = new();
     public Dictionary<string, double> Rates { get; init; } = new();
@@ -23,7 +24,7 @@ public sealed class SettingEntry
     /// <summary>"synced", "stale", or "missing"</summary>
     public required string Status { get; init; }
 
-    public DateTime? LastModified { get; init; }
+    public DateTimeOffset? LastModified { get; init; }
 }
 
 /// <summary>
@@ -31,6 +32,8 @@ public sealed class SettingEntry
 /// </summary>
 public sealed class SettingsChangedEvent
 {
-    public DateTime Timestamp { get; init; } = DateTime.UtcNow;
+    /// <summary>Set by the caller; never defaulted here — use ISystemClock.</summary>
+    public DateTimeOffset Timestamp { get; init; }
     public List<SettingEntry> Changes { get; init; } = new();
 }
+

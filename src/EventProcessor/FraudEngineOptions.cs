@@ -43,33 +43,55 @@ public class FraudEngineOptions
 
 public class ProcessingOptions
 {
+    // Technical capacity defaults — acceptable; they govern internal threading, not operational thresholds.
     public int ConsumerThreads { get; set; } = 8;
     public int BucketCount { get; set; } = 64;
     public int BucketQueueCapacity { get; set; } = 50000;
-    public int MaxBatchSize { get; set; } = 500;
-    public int BatchTimeoutMs { get; set; } = 100;
+
+    /// <summary>Required — set in appsettings (not here). Validated at startup.</summary>
+    public int MaxBatchSize { get; set; }
+
+    /// <summary>Required — set in appsettings (not here). Validated at startup.</summary>
+    public int BatchTimeoutMs { get; set; }
 }
 
 public class FlushOptions
 {
-    public int TimeBasedIntervalMs { get; set; } = 5000;
-    public int CountThreshold { get; set; } = 1000;
-    public double DirtyRatioThreshold { get; set; } = 0.3;
-    public double MemoryPressureThreshold { get; set; } = 0.85;
+    /// <summary>Required — validated at startup.</summary>
+    public int TimeBasedIntervalMs { get; set; }
+
+    /// <summary>Required — validated at startup.</summary>
+    public int CountThreshold { get; set; }
+
+    /// <summary>Required — validated at startup (0.0–1.0).</summary>
+    public double DirtyRatioThreshold { get; set; }
+
+    /// <summary>Required — validated at startup (0.0–1.0).</summary>
+    public double MemoryPressureThreshold { get; set; }
 }
 
 public class SessionOptions
 {
-    public int IdleTimeoutMinutes { get; set; } = 30;
-    public int MaxTransactionsPerSession { get; set; } = 10000;
-    public int MaxSessionDurationMinutes { get; set; } = 1440;
+    /// <summary>Required — validated at startup.</summary>
+    public int IdleTimeoutMinutes { get; set; }
+
+    /// <summary>Required — validated at startup.</summary>
+    public int MaxTransactionsPerSession { get; set; }
+
+    /// <summary>Required — validated at startup.</summary>
+    public int MaxSessionDurationMinutes { get; set; }
 }
 
 public class ScoringOptions
 {
+    // Zero is the correct mathematical identity for a base score accumulator.
     public double BaseScore { get; set; } = 0.0;
-    public double DecisionThreshold { get; set; } = 0.75;
-    public double HighScoreAlertThreshold { get; set; } = 0.5;
+
+    /// <summary>Required — validated at startup (0.0–1.0).</summary>
+    public double DecisionThreshold { get; set; }
+
+    /// <summary>Required — validated at startup (0.0 &lt; HighScore &lt; DecisionThreshold).</summary>
+    public double HighScoreAlertThreshold { get; set; }
 }
 
 public class KafkaOptions
@@ -80,23 +102,38 @@ public class KafkaOptions
 
 public class ConsumerOptions
 {
-    public string BootstrapServers { get; set; } = "localhost:29092";
-    public string GroupId { get; set; } = "fraud-engine";
-    public List<string> Topics { get; set; } = new() { "fraud.transactions" };
+    /// <summary>Required — never default to localhost. Validated at startup.</summary>
+    public string? BootstrapServers { get; set; }
+
+    /// <summary>Required — validated at startup.</summary>
+    public string? GroupId { get; set; }
+
+    /// <summary>Required — must contain at least one topic name. Validated at startup.</summary>
+    public List<string>? Topics { get; set; }
+
+    // "earliest" is the correct safe technical default for all new consumer groups.
     public string AutoOffsetReset { get; set; } = "earliest";
 }
 
 public class ProducerOptions
 {
-    public string BootstrapServers { get; set; } = "localhost:29092";
+    /// <summary>Required when a producer is configured — never default to localhost.</summary>
+    public string? BootstrapServers { get; set; }
+
+    // "all" is the safe default for producer acknowledgements.
     public string Acks { get; set; } = "all";
 }
 
 public class SqlSinkOptions
 {
-    public string ConnectionString { get; set; } = string.Empty;
-    public int BatchSize { get; set; } = 500;
-    public int TimeoutSeconds { get; set; } = 30;
+    /// <summary>Optional — if set, BatchSize and TimeoutSeconds are also required.</summary>
+    public string? ConnectionString { get; set; }
+
+    /// <summary>Required when ConnectionString is set — validated at startup.</summary>
+    public int BatchSize { get; set; }
+
+    /// <summary>Required when ConnectionString is set — validated at startup.</summary>
+    public int TimeoutSeconds { get; set; }
 }
 
 public class RuleOptions

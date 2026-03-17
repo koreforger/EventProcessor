@@ -1,160 +1,136 @@
 using EventProcessor.Configuration;
 using EventProcessor.Hubs;
+using EventProcessor.Logging;
+using KF.Time;
 using Microsoft.AspNetCore.SignalR;
-using Microsoft.Data.SqlClient;
+using Microsoft.Extensions.Primitives;
 
 namespace EventProcessor.Services;
 
 /// <summary>
-/// Monitors settings by comparing the database values against the active IConfiguration values.
-/// Pushes change events to connected SettingsHub clients via SignalR.
-/// Also provides a full snapshot for REST API initial load.
+/// Reacts to configuration reload events triggered by the <see cref="SqlSettingsConfigurationProvider"/>
+/// and pushes change summaries to connected SettingsHub clients via SignalR.
+///
+/// Responsibilities of this class:
+///   1. Subscribe to <see cref="IConfiguration"/> change tokens (fired when DB poll detects a change).
+///   2. Build a before/after diff of the current loaded settings.
+///   3. Broadcast the diff to SignalR clients.
+///
+/// What this class does NOT do:
+///   - Poll the database directly (that is the provider's job).
+///   - Own the database connection.
 /// </summary>
 public sealed class SettingsMonitor : BackgroundService
 {
     private readonly IConfiguration _configuration;
     private readonly IHubContext<SettingsHub> _hub;
-    private readonly SqlSettingsOptions _options;
-    private Dictionary<string, string?> _lastDbSnapshot = new(StringComparer.OrdinalIgnoreCase);
+    private readonly SqlSettingsConfigurationProvider? _provider;
+    private readonly ISystemClock _clock;
+    private readonly EventProcessorLog<SettingsMonitor> _log;
 
     public SettingsMonitor(
         IConfiguration configuration,
         IHubContext<SettingsHub> hub,
-        SqlSettingsOptions options)
+        ISystemClock clock,
+        EventProcessorLog<SettingsMonitor> log)
     {
         _configuration = configuration;
         _hub = hub;
-        _options = options;
+        _clock = clock;
+        _log = log;
+
+        // Locate the SQL provider in the running pipeline (null if not registered).
+        if (configuration is IConfigurationRoot root)
+            _provider = root.Providers.OfType<SqlSettingsConfigurationProvider>().FirstOrDefault();
     }
 
     /// <summary>
-    /// Returns the full settings comparison: database value vs active configuration value.
+    /// Returns the current settings snapshot by reading the provider's loaded data and
+    /// comparing each key with the active IConfiguration value.
+    /// No database round-trip — uses the already-loaded provider cache.
     /// </summary>
     public List<SettingEntry> GetSettingsSnapshot()
     {
-        var dbValues = LoadDatabaseSettings();
-        var entries = new List<SettingEntry>();
+        var providerData = _provider?.GetLoadedData()
+            ?? new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
 
-        // All keys from DB
-        foreach (var kvp in dbValues)
-        {
-            var activeValue = _configuration[kvp.Key];
-            entries.Add(new SettingEntry
+        return providerData
+            .Select(kv =>
             {
-                Key = kvp.Key,
-                DatabaseValue = kvp.Value,
-                ActiveValue = activeValue,
-                Status = activeValue == kvp.Value ? "synced" : "stale"
-            });
-        }
-
-        return entries.OrderBy(e => e.Key).ToList();
+                var active = _configuration[kv.Key];
+                return new SettingEntry
+                {
+                    Key = kv.Key,
+                    DatabaseValue = kv.Value,
+                    ActiveValue = active,
+                    Status = active == kv.Value ? "synced" : "stale"
+                };
+            })
+            .OrderBy(e => e.Key)
+            .ToList();
     }
+
+    // ── BackgroundService ─────────────────────────────────────────────────────
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        // Initial snapshot
-        _lastDbSnapshot = LoadDatabaseSettings();
+        _log.Sql.Settings.Loaded.LogInformation("SettingsMonitor started");
 
-        using var timer = new PeriodicTimer(_options.PollingInterval > TimeSpan.Zero
-            ? _options.PollingInterval
-            : TimeSpan.FromSeconds(30));
-
-        while (await timer.WaitForNextTickAsync(stoppingToken))
+        // Wait for IConfiguration change token fires (the provider calls OnReload()
+        // when it detects a DB change, which fires the token).
+        while (!stoppingToken.IsCancellationRequested)
         {
             try
             {
-                var current = LoadDatabaseSettings();
-                var changes = DetectChanges(_lastDbSnapshot, current);
-
-                if (changes.Count > 0)
-                {
-                    await _hub.Clients.All.SendAsync("SettingsChanged", new SettingsChangedEvent
-                    {
-                        Timestamp = DateTime.UtcNow,
-                        Changes = changes
-                    }, stoppingToken);
-                }
-
-                _lastDbSnapshot = current;
+                await WaitForConfigurationChangeAsync(stoppingToken);
             }
             catch (OperationCanceledException)
             {
                 break;
             }
-            catch
+
+            try
             {
-                // Swallow — next tick will retry
+                var snapshot = GetSettingsSnapshot();
+
+                _log.Sql.Settings.Changed.LogInformation(
+                    "Settings change detected; broadcasting {Count} entries to dashboard",
+                    snapshot.Count);
+
+                await _hub.Clients.All.SendAsync("SettingsChanged", new SettingsChangedEvent
+                {
+                    Timestamp = _clock.UtcNow,
+                    Changes = snapshot
+                }, stoppingToken);
+            }
+            catch (OperationCanceledException)
+            {
+                break;
+            }
+            catch (Exception ex)
+            {
+                _log.Sql.Settings.Error.LogError(ex, "Failed to broadcast settings change event");
+                // Non-fatal: next configuration reload will trigger a new broadcast.
             }
         }
+
+        _log.App.Config.Loaded.LogInformation("SettingsMonitor stopped");
     }
 
-    private List<SettingEntry> DetectChanges(
-        Dictionary<string, string?> previous,
-        Dictionary<string, string?> current)
+    // ── Helpers ───────────────────────────────────────────────────────────────
+
+    private async Task WaitForConfigurationChangeAsync(CancellationToken cancellationToken)
     {
-        var changes = new List<SettingEntry>();
+        var tcs = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 
-        foreach (var kvp in current)
-        {
-            if (!previous.TryGetValue(kvp.Key, out var oldVal) || oldVal != kvp.Value)
-            {
-                var activeValue = _configuration[kvp.Key];
-                changes.Add(new SettingEntry
-                {
-                    Key = kvp.Key,
-                    DatabaseValue = kvp.Value,
-                    ActiveValue = activeValue,
-                    Status = activeValue == kvp.Value ? "synced" : "stale"
-                });
-            }
-        }
+        IChangeToken changeToken = ((IConfigurationRoot)_configuration).GetReloadToken();
 
-        // Detect removed keys
-        foreach (var kvp in previous)
-        {
-            if (!current.ContainsKey(kvp.Key))
-            {
-                changes.Add(new SettingEntry
-                {
-                    Key = kvp.Key,
-                    DatabaseValue = null,
-                    ActiveValue = _configuration[kvp.Key],
-                    Status = "missing"
-                });
-            }
-        }
+        using var cancelReg = cancellationToken.Register(
+            static state => ((TaskCompletionSource)state!).TrySetCanceled(), tcs);
+        using var changeReg = changeToken.RegisterChangeCallback(
+            static state => ((TaskCompletionSource)state!).TrySetResult(), tcs);
 
-        return changes;
-    }
-
-    private Dictionary<string, string?> LoadDatabaseSettings()
-    {
-        var data = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
-        if (string.IsNullOrWhiteSpace(_options.ConnectionString)) return data;
-
-        using var connection = new SqlConnection(_options.ConnectionString);
-        connection.Open();
-
-        const string sql = """
-            SELECT [Key], [Value]
-            FROM dbo.Settings
-            WHERE ApplicationId = @AppId
-              AND (InstanceId IS NULL OR InstanceId = @InstanceId OR InstanceId = '*')
-            ORDER BY
-                CASE WHEN InstanceId IS NULL THEN 0 WHEN InstanceId = '*' THEN 1 ELSE 2 END
-            """;
-
-        using var cmd = new SqlCommand(sql, connection);
-        cmd.Parameters.AddWithValue("@AppId", _options.Application);
-        cmd.Parameters.AddWithValue("@InstanceId", _options.Instance);
-
-        using var reader = cmd.ExecuteReader();
-        while (reader.Read())
-        {
-            data[reader.GetString(0)] = reader.IsDBNull(1) ? null : reader.GetString(1);
-        }
-
-        return data;
+        await tcs.Task;
     }
 }
+

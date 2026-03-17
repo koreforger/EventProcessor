@@ -1,5 +1,5 @@
 import { ref, onUnmounted } from 'vue'
-import { HubConnectionBuilder, HubConnectionState, LogLevel } from '@microsoft/signalr'
+import { HubConnectionBuilder, HubConnectionState, HttpTransportType, LogLevel } from '@microsoft/signalr'
 import type { HubConnection } from '@microsoft/signalr'
 
 const connections = new Map<string, HubConnection>()
@@ -12,7 +12,7 @@ export function useSignalR(hubUrl: string) {
 
   if (!connection) {
     connection = new HubConnectionBuilder()
-      .withUrl(hubUrl)
+      .withUrl(hubUrl, { transport: HttpTransportType.ServerSentEvents | HttpTransportType.LongPolling })
       .withAutomaticReconnect([0, 1000, 2000, 5000, 10000])
       .configureLogging(LogLevel.Warning)
       .build()

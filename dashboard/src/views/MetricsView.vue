@@ -12,32 +12,32 @@
 
     <div class="charts-grid">
       <MetricChart
-        title="Messages Consumed"
-        metric-key="messages.consumed"
+        title="Batches Processed"
+        metric-key="kafka.consumer.pipeline.batch"
         :snapshots="snapshots"
         color="#89b4fa"
         mode="rate"
       />
       <MetricChart
-        title="Batches Processed"
-        metric-key="batches.processed"
+        title="Pipeline Steps"
+        metric-key="kafka.pipeline.step"
         :snapshots="snapshots"
         color="#a6e3a1"
         mode="rate"
       />
       <MetricChart
-        title="JEX Extractions"
-        metric-key="jex.extractions"
-        :snapshots="snapshots"
-        color="#f9e2af"
-        mode="rate"
-      />
-      <MetricChart
-        title="Errors"
-        metric-key="errors.total"
+        title="Batch Errors"
+        metric-key="kafka.consumer.pipeline.batch"
         :snapshots="snapshots"
         color="#f38ba8"
-        mode="rate"
+        mode="counter"
+      />
+      <MetricChart
+        title="Step Aborts"
+        metric-key="kafka.pipeline.step.abort"
+        :snapshots="snapshots"
+        color="#f9e2af"
+        mode="counter"
       />
     </div>
   </div>
