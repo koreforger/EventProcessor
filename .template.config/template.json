@@ -1,0 +1,64 @@
+{
+  "$schema": "http://json.schemastore.org/template",
+  "author": "KoreForge",
+  "classifications": [ "KoreForge", "Kafka", "Worker", "Vue", "Dashboard", "SignalR" ],
+  "identity": "KoreForge.Templates.KafkaProcessor",
+  "name": "KoreForge Kafka Processor",
+  "shortName": "kf-kafka-processor",
+  "description": "A KoreForge Kafka consumer application with a Vue 3 live dashboard (SignalR metrics), SQL live-reload settings, structured logging, and health checks.",
+  "sourceName": "EventProcessor",
+  "preferNameDirectory": true,
+  "tags": {
+    "language": "C#",
+    "type": "solution"
+  },
+  "symbols": {
+    "KafkaTopic": {
+      "type": "parameter",
+      "datatype": "string",
+      "defaultValue": "transactions",
+      "description": "Kafka topic name to consume from.",
+      "replaces": "transactions"
+    },
+    "DatabaseName": {
+      "type": "parameter",
+      "datatype": "string",
+      "defaultValue": "FraudEngine",
+      "description": "SQL Server database name used in the connection string and settings source.",
+      "replaces": "FraudEngine"
+    }
+  },
+  "sources": [
+    {
+      "exclude": [
+        ".template.config/**",
+        "**/bin/**",
+        "**/obj/**",
+        "**/node_modules/**",
+        "**/artifacts/**",
+        "**/.vs/**",
+        "**/*.user",
+        "**/TestResults/**",
+        "package-lock.json",
+        "ws-status.txt"
+      ]
+    }
+  ],
+  "postActions": [
+    {
+      "description": "Restore NuGet packages",
+      "manualInstructions": [ { "text": "Run 'dotnet restore'" } ],
+      "actionId": "210D431B-A78B-4D2F-B762-4ED3E3EA9025",
+      "args": {
+        "files": [ "src/**/*.csproj", "tst/**/*.csproj" ]
+      },
+      "continueOnError": true
+    },
+    {
+      "description": "Install npm packages for the Vue dashboard",
+      "manualInstructions": [ { "text": "cd dashboard && npm install" } ],
+      "actionId": "3A7C4B45-1F5D-4A30-AD44-BFBC6F3C4E12",
+      "continueOnError": true
+    }
+  ]
+}
