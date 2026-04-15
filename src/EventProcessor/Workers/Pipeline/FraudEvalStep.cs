@@ -7,25 +7,30 @@ using Newtonsoft.Json.Linq;
 namespace EventProcessor.Workers.Pipeline;
 
 /// <summary>
-/// Third pipeline step: applies the loaded fraud rules to the extracted transaction fields
-/// and produces a <see cref="FraudDecision"/>.
-///
-/// NOTE: This is a stub implementation. Full production logic requires FASTER session-state
-/// lookup (load-or-create FraudSession per NID) which will be wired in once the session
-/// bucket infrastructure is ready.
+/// Third pipeline step: loads (or creates) the FASTER-backed fraud session for the
+/// incoming NID, applies built-in fraud rules, updates session state, persists back
+/// to FASTER, and publishes the decision via the configured producer.
 /// </summary>
 internal sealed class FraudEvalStep : IPipelineStep<JObject, FraudDecision>
 {
     private readonly IFraudRuleEngine _ruleEngine;
+    private readonly ISessionStore _sessionStore;
+    private readonly IFraudDecisionProducer _producer;
     private readonly ILogger<FraudEvalStep> _logger;
 
-    public FraudEvalStep(IFraudRuleEngine ruleEngine, ILogger<FraudEvalStep> logger)
+    public FraudEvalStep(
+        IFraudRuleEngine ruleEngine,
+        ISessionStore sessionStore,
+        IFraudDecisionProducer producer,
+        ILogger<FraudEvalStep> logger)
     {
         _ruleEngine = ruleEngine;
+        _sessionStore = sessionStore;
+        _producer = producer;
         _logger = logger;
     }
 
-    public ValueTask<StepOutcome<FraudDecision>> InvokeAsync(
+    public async ValueTask<StepOutcome<FraudDecision>> InvokeAsync(
         JObject extracted,
         PipelineContext context,
         CancellationToken cancellationToken)
@@ -40,10 +45,30 @@ internal sealed class FraudEvalStep : IPipelineStep<JObject, FraudDecision>
             Timestamp = DateTimeOffset.UtcNow,
         };
 
-        // TODO: Load real session state from FASTER (session bucket lookup by NID hash).
-        var session = new FraudSession { NID = tx.NID };
-        var results = _ruleEngine.Evaluate(tx, session);
+        // 1. Load or create session from FASTER (bucket-routed by NID hash).
+        var session = _sessionStore.GetOrCreate(tx.NID);
 
+        // 2. Accumulate transaction into session state.
+        session.TransactionCount++;
+        session.TotalAmount += tx.Amount;
+        session.LastActivityAt = DateTimeOffset.UtcNow;
+        session.BaseCountry ??= tx.CountryCode;
+
+        session.RecentTransactions.Add(new TransactionRecord
+        {
+            TransactionId = tx.TransactionId,
+            Amount = tx.Amount,
+            Timestamp = tx.Timestamp,
+            CountryCode = tx.CountryCode,
+        });
+
+        // Keep recent transactions bounded to avoid unbounded growth.
+        const int maxRecent = 100;
+        if (session.RecentTransactions.Count > maxRecent)
+            session.RecentTransactions.RemoveRange(0, session.RecentTransactions.Count - maxRecent);
+
+        // 3. Evaluate fraud rules against current transaction + session state.
+        var results = _ruleEngine.Evaluate(tx, session);
         var totalScore = results.Sum(r => r.ScoreModifier);
         var triggered = results.Where(r => r.IsMatch).Select(r => r.RuleName).ToList();
 
@@ -53,12 +78,17 @@ internal sealed class FraudEvalStep : IPipelineStep<JObject, FraudDecision>
                 ? DecisionType.Flagged
                 : DecisionType.Allow;
 
-        if (decisionType != DecisionType.Allow)
-        {
-            _logger.LogInformation(
-                "Fraud decision for NID {NID}: Decision={Decision}, Score={Score:F3}, Rules=[{Rules}]",
-                tx.NID, decisionType, totalScore, string.Join(", ", triggered));
-        }
+        // 4. Update session score and triggered rules, persist to FASTER.
+        session.CurrentScore = totalScore;
+        session.TriggeredRules = results
+            .Where(r => r.IsMatch)
+            .Select(r => new RuleResult
+            {
+                RuleName = r.RuleName,
+                ScoreAdjustment = r.ScoreModifier,
+                MatchedAt = DateTimeOffset.UtcNow,
+            })
+            .ToList();
 
         var decision = new FraudDecision
         {
@@ -67,7 +97,20 @@ internal sealed class FraudEvalStep : IPipelineStep<JObject, FraudDecision>
             DecidedAt = DateTimeOffset.UtcNow,
             TriggeredRuleNames = triggered,
         };
+        session.Decision = decision;
 
-        return ValueTask.FromResult(StepOutcome<FraudDecision>.Continue(decision));
+        _sessionStore.Put(tx.NID, session);
+
+        // 5. Publish decision to Kafka (no-op if producer disabled).
+        await _producer.ProduceAsync(tx.NID, decision, cancellationToken);
+
+        if (decisionType != DecisionType.Allow)
+        {
+            _logger.LogInformation(
+                "Fraud decision for NID {NID}: Decision={Decision}, Score={Score:F3}, Rules=[{Rules}]",
+                tx.NID, decisionType, totalScore, string.Join(", ", triggered));
+        }
+
+        return StepOutcome<FraudDecision>.Continue(decision);
     }
 }

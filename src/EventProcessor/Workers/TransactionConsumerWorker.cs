@@ -34,6 +34,8 @@ public sealed class TransactionConsumerWorker : BackgroundService
     private readonly IKafkaClientConfigFactory _configFactory;
     private readonly JexFieldExtractorService _extractor;
     private readonly IFraudRuleEngine _ruleEngine;
+    private readonly ISessionStore _sessionStore;
+    private readonly IFraudDecisionProducer _producer;
     private readonly ILoggerFactory _loggerFactory;
     private readonly KafkaConsumerState _consumerState;
     private readonly IOperationMonitor _monitor;
@@ -44,6 +46,8 @@ public sealed class TransactionConsumerWorker : BackgroundService
         IKafkaClientConfigFactory configFactory,
         JexFieldExtractorService extractor,
         IFraudRuleEngine ruleEngine,
+        ISessionStore sessionStore,
+        IFraudDecisionProducer producer,
         ILoggerFactory loggerFactory,
         KafkaConsumerState consumerState,
         IOperationMonitor monitor)
@@ -52,6 +56,8 @@ public sealed class TransactionConsumerWorker : BackgroundService
         _configFactory = configFactory;
         _extractor = extractor;
         _ruleEngine = ruleEngine;
+        _sessionStore = sessionStore;
+        _producer = producer;
         _loggerFactory = loggerFactory;
         _consumerState = consumerState;
         _monitor = monitor;
@@ -136,7 +142,7 @@ public sealed class TransactionConsumerWorker : BackgroundService
                 KorePipeline.Start<KafkaPipelineRecord>()
                     .UseStep(new DecodeBytesStep())
                     .UseStep(new JexExtractStep(_extractor))
-                    .UseStep(new FraudEvalStep(_ruleEngine, fraudEvalLogger))
+                    .UseStep(new FraudEvalStep(_ruleEngine, _sessionStore, _producer, fraudEvalLogger))
                     .Build())
             .Build();
     }

@@ -36,8 +36,23 @@ public static class ServiceCollectionExtensions
         // JEX-based field extractor
         services.AddSingleton<JexFieldExtractorService>();
 
+        // FASTER-backed session store (in-memory, flushed to SQL by FlushCoordinator)
+        services.AddSingleton<ISessionStore, FasterSessionStore>();
+
+        // Fraud decision Kafka producer (interface-based, on/off toggle)
+        services.AddSingleton<IFraudDecisionProducer>(sp =>
+        {
+            var options = sp.GetRequiredService<IOptions<FraudEngineOptions>>();
+            if (options.Value.Kafka.Producer.Enabled)
+                return ActivatorUtilities.CreateInstance<KafkaFraudDecisionProducer>(sp);
+            return new NoOpFraudDecisionProducer();
+        });
+
         // Kafka consumer hosted service + processing pipeline
         services.AddHostedService<TransactionConsumerWorker>();
+
+        // Flush coordinator — drains dirty sessions to SQL on a timer
+        services.AddHostedService<FlushCoordinator>();
 
         // Fraud rule engine
         services.AddSingleton<IFraudRuleEngine, SimpleFraudRuleEngine>();

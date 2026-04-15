@@ -1,0 +1,236 @@
+using EventProcessor.Models;
+using EventProcessor.Services;
+using EventProcessor.Workers.Pipeline;
+using FluentAssertions;
+using KoreForge.Processing.Pipelines;
+using Microsoft.Extensions.Logging.Abstractions;
+using Newtonsoft.Json.Linq;
+
+namespace EventProcessor.Tests.Pipeline;
+
+public sealed class FraudEvalStepTests : IDisposable
+{
+    private readonly FakeSessionStore _sessionStore = new();
+    private readonly FakeProducer _producer = new();
+    private readonly FraudEvalStep _step;
+
+    public FraudEvalStepTests()
+    {
+        var ruleEngine = new SimpleFraudRuleEngine(
+            new FakeOptionsMonitor(ValidOptions()),
+            TestLogHelper.CreateLog<SimpleFraudRuleEngine>());
+
+        _step = new FraudEvalStep(
+            ruleEngine,
+            _sessionStore,
+            _producer,
+            NullLogger<FraudEvalStep>.Instance);
+    }
+
+    public void Dispose()
+    {
+        _sessionStore.Dispose();
+        _producer.Dispose();
+    }
+
+    [Fact]
+    public async Task Low_amount_transaction_yields_allow_decision()
+    {
+        var extracted = JObject.FromObject(new
+        {
+            nid = "NID-001",
+            transactionId = "TX-001",
+            amount = 50m,
+            countryCode = "US",
+        });
+
+        var outcome = await _step.InvokeAsync(extracted, new PipelineContext(), default);
+
+        outcome.Kind.Should().Be(StepOutcomeKind.Continue);
+        outcome.Value.Decision.Should().Be(DecisionType.Allow);
+        outcome.Value.Score.Should().Be(0);
+    }
+
+    [Fact]
+    public async Task High_amount_triggers_flagged_or_blocked()
+    {
+        var extracted = JObject.FromObject(new
+        {
+            nid = "NID-002",
+            transactionId = "TX-002",
+            amount = 55000m,
+            countryCode = "US",
+        });
+
+        var outcome = await _step.InvokeAsync(extracted, new PipelineContext(), default);
+
+        outcome.Kind.Should().Be(StepOutcomeKind.Continue);
+        // VeryHighAmount (0.6) + HighAmount (0.3) = 0.9 → Flagged
+        outcome.Value.Score.Should().BeGreaterThan(0);
+        outcome.Value.Decision.Should().NotBe(DecisionType.Allow);
+    }
+
+    [Fact]
+    public async Task Session_state_accumulates_across_transactions()
+    {
+        var nid = "NID-ACCUM";
+
+        for (int i = 0; i < 3; i++)
+        {
+            var extracted = JObject.FromObject(new
+            {
+                nid,
+                transactionId = $"TX-{i}",
+                amount = 100m,
+                countryCode = "US",
+            });
+            await _step.InvokeAsync(extracted, new PipelineContext(), default);
+        }
+
+        var session = _sessionStore.GetOrCreate(nid);
+        session.TransactionCount.Should().Be(3);
+        session.TotalAmount.Should().Be(300m);
+    }
+
+    [Fact]
+    public async Task Session_base_country_set_from_first_transaction()
+    {
+        var extracted = JObject.FromObject(new
+        {
+            nid = "NID-COUNTRY",
+            transactionId = "TX-1",
+            amount = 10m,
+            countryCode = "NO",
+        });
+
+        await _step.InvokeAsync(extracted, new PipelineContext(), default);
+
+        var session = _sessionStore.GetOrCreate("NID-COUNTRY");
+        session.BaseCountry.Should().Be("NO");
+    }
+
+    [Fact]
+    public async Task Unusual_location_triggers_rule_when_country_differs()
+    {
+        var nid = "NID-TRAVEL";
+
+        // First transaction sets base country.
+        var first = JObject.FromObject(new { nid, transactionId = "TX-1", amount = 10m, countryCode = "US" });
+        await _step.InvokeAsync(first, new PipelineContext(), default);
+
+        // Second transaction from different country.
+        var second = JObject.FromObject(new { nid, transactionId = "TX-2", amount = 10m, countryCode = "RU" });
+        var outcome = await _step.InvokeAsync(second, new PipelineContext(), default);
+
+        outcome.Value.TriggeredRuleNames.Should().Contain("UnusualLocation");
+    }
+
+    [Fact]
+    public async Task Producer_receives_decision()
+    {
+        var extracted = JObject.FromObject(new
+        {
+            nid = "NID-PRODUCE",
+            transactionId = "TX-1",
+            amount = 10m,
+        });
+
+        await _step.InvokeAsync(extracted, new PipelineContext(), default);
+
+        _producer.Produced.Should().HaveCount(1);
+        _producer.Produced[0].Nid.Should().Be("NID-PRODUCE");
+    }
+
+    [Fact]
+    public async Task Recent_transactions_bounded_at_100()
+    {
+        var nid = "NID-BOUNDED";
+        for (int i = 0; i < 110; i++)
+        {
+            var extracted = JObject.FromObject(new { nid, transactionId = $"TX-{i}", amount = 1m });
+            await _step.InvokeAsync(extracted, new PipelineContext(), default);
+        }
+
+        var session = _sessionStore.GetOrCreate(nid);
+        session.RecentTransactions.Count.Should().BeLessThanOrEqualTo(100);
+    }
+
+    // ── Test doubles ────────────────────────────────────────────────
+
+    private static FraudEngineOptions ValidOptions() => new()
+    {
+        Kafka = new KafkaOptions
+        {
+            Consumer = new ConsumerOptions { BootstrapServers = "localhost:9092", GroupId = "g", Topics = ["t"] }
+        },
+        Processing = new ProcessingOptions { MaxBatchSize = 100, BatchTimeoutMs = 50, BucketCount = 4 },
+        Flush = new FlushOptions { TimeBasedIntervalMs = 1000, CountThreshold = 500, DirtyRatioThreshold = 0.3, MemoryPressureThreshold = 0.85 },
+        Sessions = new SessionOptions { IdleTimeoutMinutes = 30, MaxTransactionsPerSession = 10000, MaxSessionDurationMinutes = 1440 },
+        Scoring = new ScoringOptions { DecisionThreshold = 0.75, HighScoreAlertThreshold = 0.5 },
+        Rules =
+        [
+            new RuleOptions { Name = "HighAmount", Expression = "tx.amount > 10000", ScoreModifier = 0.3, Enabled = true },
+            new RuleOptions { Name = "VeryHighAmount", Expression = "tx.amount > 50000", ScoreModifier = 0.6, Enabled = true },
+            new RuleOptions { Name = "RapidTransactions", Expression = "session.txCount > 10", ScoreModifier = 0.4, Enabled = true },
+            new RuleOptions { Name = "UnusualLocation", Expression = "tx.country != session.baseCountry", ScoreModifier = 0.5, Enabled = true },
+            new RuleOptions { Name = "LargeSessionTotal", Expression = "session.totalAmount > 100000", ScoreModifier = 0.7, Enabled = true },
+        ],
+    };
+
+    private sealed class FakeOptionsMonitor(FraudEngineOptions value) : Microsoft.Extensions.Options.IOptionsMonitor<FraudEngineOptions>
+    {
+        public FraudEngineOptions CurrentValue => value;
+        public FraudEngineOptions Get(string? name) => value;
+        public IDisposable? OnChange(Action<FraudEngineOptions, string?> listener) => null;
+    }
+
+    private sealed class FakeSessionStore : ISessionStore
+    {
+        private readonly Dictionary<string, FraudSession> _sessions = new();
+        private readonly HashSet<string> _dirty = new();
+
+        public FraudSession GetOrCreate(string nid)
+        {
+            if (_sessions.TryGetValue(nid, out var existing))
+                return existing;
+
+            var session = new FraudSession
+            {
+                NID = nid,
+                Status = SessionStatus.Active,
+                CreatedAt = DateTimeOffset.UtcNow,
+                LastActivityAt = DateTimeOffset.UtcNow,
+            };
+            _sessions[nid] = session;
+            return session;
+        }
+
+        public void Put(string nid, FraudSession session)
+        {
+            _sessions[nid] = session;
+            _dirty.Add(nid);
+        }
+
+        public IReadOnlyList<(string Nid, FraudSession Session)> DrainDirty(int maxCount) =>
+            _dirty.Take(maxCount).Select(n => (n, _sessions[n])).ToList();
+
+        public long Count => _sessions.Count;
+        public long DirtyCount => _dirty.Count;
+        public int BucketCount => 4;
+        public int GetBucket(string nid) => (nid.GetHashCode() & 0x7FFFFFFF) % BucketCount;
+        public void Dispose() { }
+    }
+
+    private sealed class FakeProducer : IFraudDecisionProducer
+    {
+        public List<(string Nid, FraudDecision Decision)> Produced { get; } = new();
+
+        public Task ProduceAsync(string nid, FraudDecision decision, CancellationToken ct)
+        {
+            Produced.Add((nid, decision));
+            return Task.CompletedTask;
+        }
+
+        public void Dispose() { }
+    }
+}

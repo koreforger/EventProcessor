@@ -117,8 +117,14 @@ public class ConsumerOptions
 
 public class ProducerOptions
 {
-    /// <summary>Required when a producer is configured — never default to localhost.</summary>
+    /// <summary>Whether the Kafka decision producer is enabled. When false, a no-op producer is used.</summary>
+    public bool Enabled { get; set; }
+
+    /// <summary>Required when Enabled — never default to localhost.</summary>
     public string? BootstrapServers { get; set; }
+
+    /// <summary>Target topic for fraud decision messages.</summary>
+    public string Topic { get; set; } = "fraud-decisions";
 
     // "all" is the safe default for producer acknowledgements.
     public string Acks { get; set; } = "all";
