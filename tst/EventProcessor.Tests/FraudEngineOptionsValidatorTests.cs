@@ -122,6 +122,149 @@ public sealed class FraudEngineOptionsValidatorTests
     }
 
     [Fact]
+    public void High_score_threshold_equal_to_decision_threshold_fails()
+    {
+        var options = ValidOptions();
+        options.Scoring.DecisionThreshold = 0.75;
+        options.Scoring.HighScoreAlertThreshold = 0.75;
+        var result = Validator.Validate(null, options);
+        Assert.False(result.Succeeded);
+        Assert.Contains("HighScoreAlertThreshold", result.FailureMessage);
+    }
+
+    [Fact]
+    public void BatchTimeoutMs_zero_fails()
+    {
+        var options = ValidOptions();
+        options.Processing.BatchTimeoutMs = 0;
+        var result = Validator.Validate(null, options);
+        Assert.False(result.Succeeded);
+        Assert.Contains("BatchTimeoutMs", result.FailureMessage);
+    }
+
+    [Fact]
+    public void CountThreshold_zero_fails()
+    {
+        var options = ValidOptions();
+        options.Flush.CountThreshold = 0;
+        var result = Validator.Validate(null, options);
+        Assert.False(result.Succeeded);
+        Assert.Contains("CountThreshold", result.FailureMessage);
+    }
+
+    [Theory]
+    [InlineData(0.0)]
+    [InlineData(1.0)]
+    [InlineData(-0.1)]
+    public void MemoryPressureThreshold_out_of_range_fails(double value)
+    {
+        var options = ValidOptions();
+        options.Flush.MemoryPressureThreshold = value;
+        var result = Validator.Validate(null, options);
+        Assert.False(result.Succeeded);
+        Assert.Contains("MemoryPressureThreshold", result.FailureMessage);
+    }
+
+    [Fact]
+    public void IdleTimeoutMinutes_zero_fails()
+    {
+        var options = ValidOptions();
+        options.Sessions.IdleTimeoutMinutes = 0;
+        var result = Validator.Validate(null, options);
+        Assert.False(result.Succeeded);
+        Assert.Contains("IdleTimeoutMinutes", result.FailureMessage);
+    }
+
+    [Fact]
+    public void MaxTransactionsPerSession_zero_fails()
+    {
+        var options = ValidOptions();
+        options.Sessions.MaxTransactionsPerSession = 0;
+        var result = Validator.Validate(null, options);
+        Assert.False(result.Succeeded);
+        Assert.Contains("MaxTransactionsPerSession", result.FailureMessage);
+    }
+
+    [Fact]
+    public void MaxSessionDurationMinutes_zero_fails()
+    {
+        var options = ValidOptions();
+        options.Sessions.MaxSessionDurationMinutes = 0;
+        var result = Validator.Validate(null, options);
+        Assert.False(result.Succeeded);
+        Assert.Contains("MaxSessionDurationMinutes", result.FailureMessage);
+    }
+
+    [Theory]
+    [InlineData(0.0)]
+    [InlineData(-0.1)]
+    [InlineData(1.1)]
+    public void DecisionThreshold_out_of_range_fails(double value)
+    {
+        var options = ValidOptions();
+        options.Scoring.DecisionThreshold = value;
+        // Also fix alert threshold to avoid cascading failure
+        options.Scoring.HighScoreAlertThreshold = value > 0 ? value - 0.01 : 0.01;
+        var result = Validator.Validate(null, options);
+        Assert.False(result.Succeeded);
+        Assert.Contains("DecisionThreshold", result.FailureMessage);
+    }
+
+    [Fact]
+    public void Null_topics_fails()
+    {
+        var options = ValidOptions();
+        options.Kafka.Consumer.Topics = null;
+        var result = Validator.Validate(null, options);
+        Assert.False(result.Succeeded);
+        Assert.Contains("Topics", result.FailureMessage);
+    }
+
+    [Fact]
+    public void SqlSink_with_connection_string_and_zero_batch_size_fails()
+    {
+        var options = ValidOptions();
+        options.SqlSink = new SqlSinkOptions
+        {
+            ConnectionString = "Server=localhost;Database=test;",
+            BatchSize = 0,
+            TimeoutSeconds = 30,
+        };
+        var result = Validator.Validate(null, options);
+        Assert.False(result.Succeeded);
+        Assert.Contains("BatchSize", result.FailureMessage);
+    }
+
+    [Fact]
+    public void SqlSink_with_connection_string_and_zero_timeout_fails()
+    {
+        var options = ValidOptions();
+        options.SqlSink = new SqlSinkOptions
+        {
+            ConnectionString = "Server=localhost;Database=test;",
+            BatchSize = 500,
+            TimeoutSeconds = 0,
+        };
+        var result = Validator.Validate(null, options);
+        Assert.False(result.Succeeded);
+        Assert.Contains("TimeoutSeconds", result.FailureMessage);
+    }
+
+    [Fact]
+    public void SqlSink_without_connection_string_ignores_batch_params()
+    {
+        var options = ValidOptions();
+        options.SqlSink = new SqlSinkOptions
+        {
+            ConnectionString = null,
+            BatchSize = 0,
+            TimeoutSeconds = 0,
+        };
+        var result = Validator.Validate(null, options);
+        Assert.True(result.Succeeded);
+    }
+
+    [Fact]
     public void Multiple_errors_accumulated_in_one_result()
     {
         var options = new FraudEngineOptions(); // all defaults — zero for required numbers

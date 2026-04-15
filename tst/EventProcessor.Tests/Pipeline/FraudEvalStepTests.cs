@@ -47,8 +47,8 @@ public sealed class FraudEvalStepTests : IDisposable
         var outcome = await _step.InvokeAsync(extracted, new PipelineContext(), default);
 
         outcome.Kind.Should().Be(StepOutcomeKind.Continue);
-        outcome.Value.Decision.Should().Be(DecisionType.Allow);
-        outcome.Value.Score.Should().Be(0);
+        outcome.Value!.Decision.Should().Be(DecisionType.Allow);
+        outcome.Value!.Score.Should().Be(0);
     }
 
     [Fact]
@@ -66,8 +66,8 @@ public sealed class FraudEvalStepTests : IDisposable
 
         outcome.Kind.Should().Be(StepOutcomeKind.Continue);
         // VeryHighAmount (0.6) + HighAmount (0.3) = 0.9 → Flagged
-        outcome.Value.Score.Should().BeGreaterThan(0);
-        outcome.Value.Decision.Should().NotBe(DecisionType.Allow);
+        outcome.Value!.Score.Should().BeGreaterThan(0);
+        outcome.Value!.Decision.Should().NotBe(DecisionType.Allow);
     }
 
     [Fact]
@@ -122,7 +122,7 @@ public sealed class FraudEvalStepTests : IDisposable
         var second = JObject.FromObject(new { nid, transactionId = "TX-2", amount = 10m, countryCode = "RU" });
         var outcome = await _step.InvokeAsync(second, new PipelineContext(), default);
 
-        outcome.Value.TriggeredRuleNames.Should().Contain("UnusualLocation");
+        outcome.Value!.TriggeredRuleNames.Should().Contain("UnusualLocation");
     }
 
     [Fact]
@@ -153,6 +153,87 @@ public sealed class FraudEvalStepTests : IDisposable
 
         var session = await _sessionStore.GetOrCreateAsync(nid);
         session.Transactions.Count.Should().Be(110);
+    }
+
+    [Fact]
+    public async Task Score_above_1_yields_blocked_decision()
+    {
+        // HighAmount (0.3) + VeryHighAmount (0.6) + UnusualLocation (0.5) = 1.4 → Blocked
+        var first = JObject.FromObject(new { nid = "NID-BLOCK", transactionId = "TX-0", amount = 10m, countryCode = "US" });
+        await _step.InvokeAsync(first, new PipelineContext(), default);
+
+        var second = JObject.FromObject(new { nid = "NID-BLOCK", transactionId = "TX-1", amount = 55000m, countryCode = "RU" });
+        var outcome = await _step.InvokeAsync(second, new PipelineContext(), default);
+
+        outcome.Value!.Decision.Should().Be(DecisionType.Blocked);
+        outcome.Value!.Score.Should().BeGreaterThanOrEqualTo(1.0);
+    }
+
+    [Fact]
+    public async Task Missing_nid_uses_empty_string()
+    {
+        var extracted = JObject.FromObject(new { transactionId = "TX-1", amount = 10m });
+        var outcome = await _step.InvokeAsync(extracted, new PipelineContext(), default);
+
+        outcome.Kind.Should().Be(StepOutcomeKind.Continue);
+        // Session is keyed on empty string
+        var session = await _sessionStore.GetOrCreateAsync(string.Empty);
+        session.TransactionCount.Should().BeGreaterThan(0);
+    }
+
+    [Fact]
+    public async Task Missing_amount_defaults_to_zero()
+    {
+        var extracted = JObject.FromObject(new { nid = "NID-NOAMT", transactionId = "TX-1", countryCode = "US" });
+        await _step.InvokeAsync(extracted, new PipelineContext(), default);
+
+        var session = await _sessionStore.GetOrCreateAsync("NID-NOAMT");
+        session.TotalAmount.Should().Be(0m);
+    }
+
+    [Fact]
+    public async Task Session_earliest_transaction_set_on_first_tx()
+    {
+        var extracted = JObject.FromObject(new { nid = "NID-EARLIEST", transactionId = "TX-1", amount = 10m });
+        await _step.InvokeAsync(extracted, new PipelineContext(), default);
+
+        var session = await _sessionStore.GetOrCreateAsync("NID-EARLIEST");
+        session.EarliestTransactionAt.Should().NotBeNull();
+        session.EarliestTransactionAt.Should().BeCloseTo(DateTimeOffset.UtcNow, TimeSpan.FromSeconds(5));
+    }
+
+    [Fact]
+    public async Task Session_decision_field_set_after_evaluation()
+    {
+        var extracted = JObject.FromObject(new { nid = "NID-DEC", transactionId = "TX-1", amount = 10m, countryCode = "US" });
+        await _step.InvokeAsync(extracted, new PipelineContext(), default);
+
+        var session = await _sessionStore.GetOrCreateAsync("NID-DEC");
+        session.Decision.Should().NotBeNull();
+        session.Decision!.Decision.Should().Be(DecisionType.Allow);
+    }
+
+    [Fact]
+    public async Task Null_country_code_leaves_base_country_null()
+    {
+        var extracted = new JObject { ["nid"] = "NID-NULLC", ["transactionId"] = "TX-1", ["amount"] = 10 };
+        // countryCode not set at all
+        await _step.InvokeAsync(extracted, new PipelineContext(), default);
+
+        var session = await _sessionStore.GetOrCreateAsync("NID-NULLC");
+        session.BaseCountry.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task Session_triggered_rules_populated()
+    {
+        var extracted = JObject.FromObject(new { nid = "NID-RULES", transactionId = "TX-1", amount = 55000m, countryCode = "US" });
+        await _step.InvokeAsync(extracted, new PipelineContext(), default);
+
+        var session = await _sessionStore.GetOrCreateAsync("NID-RULES");
+        session.TriggeredRules.Should().NotBeEmpty();
+        session.TriggeredRules.Select(r => r.RuleName).Should().Contain("HighAmount");
+        session.TriggeredRules.Select(r => r.RuleName).Should().Contain("VeryHighAmount");
     }
 
     // ── Test doubles ────────────────────────────────────────────────

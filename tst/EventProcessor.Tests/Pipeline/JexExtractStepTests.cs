@@ -38,3 +38,98 @@ public sealed class JexExtractStepTests
         outcome.Kind.Should().Be(StepOutcomeKind.Abort);
     }
 }
+
+// ── JexFieldExtractorService direct tests ─────────────────────────────────
+
+public sealed class JexFieldExtractorServiceTests
+{
+    private readonly JexFieldExtractorService _extractor;
+
+    public JexFieldExtractorServiceTests()
+    {
+        var compiler = new KoreForge.Jex.Jex();
+        _extractor = new JexFieldExtractorService(TestLogHelper.CreateLog<JexFieldExtractorService>(), compiler);
+    }
+
+    [Fact]
+    public void Extract_maps_standard_field_names()
+    {
+        var result = _extractor.Extract("""{"nid":"12345","amount":500,"countryCode":"NO"}""");
+
+        result.Should().NotBeNull();
+        result!.Value<string>("nid").Should().Be("12345");
+        result.Value<decimal>("amount").Should().Be(500);
+        result.Value<string>("countryCode").Should().Be("NO");
+    }
+
+    [Fact]
+    public void Extract_maps_alternative_field_name_NID_uppercase()
+    {
+        var result = _extractor.Extract("""{"NID":"12345","amount":100}""");
+
+        result.Should().NotBeNull();
+        result!.Value<string>("nid").Should().Be("12345");
+    }
+
+    [Fact]
+    public void Extract_maps_alternative_field_name_customerId()
+    {
+        var result = _extractor.Extract("""{"customerId":"12345","amount":100}""");
+
+        result.Should().NotBeNull();
+        result!.Value<string>("nid").Should().Be("12345");
+    }
+
+    [Fact]
+    public void Extract_maps_alternative_field_name_customer_id()
+    {
+        var result = _extractor.Extract("""{"customer_id":"12345","amount":100}""");
+
+        result.Should().NotBeNull();
+        result!.Value<string>("nid").Should().Be("12345");
+    }
+
+    [Fact]
+    public void Extract_maps_alternative_field_name_transaction_id()
+    {
+        var result = _extractor.Extract("""{"nid":"X","transaction_id":"TX-99"}""");
+
+        result.Should().NotBeNull();
+        result!.Value<string>("transactionId").Should().Be("TX-99");
+    }
+
+    [Fact]
+    public void Extract_valid_json_missing_nid_returns_object_with_null_nid()
+    {
+        var result = _extractor.Extract("""{"amount":500,"countryCode":"NO"}""");
+
+        result.Should().NotBeNull();
+        result!.Value<string>("nid").Should().BeNull();
+    }
+
+    [Fact]
+    public void Extract_malformed_json_returns_null()
+    {
+        var result = _extractor.Extract("{not valid json}}}");
+
+        result.Should().BeNull();
+    }
+
+    [Fact]
+    public void Extract_maps_alternative_amount_field()
+    {
+        var result = _extractor.Extract("""{"nid":"X","transactionAmount":750}""");
+
+        result.Should().NotBeNull();
+        result!.Value<decimal>("amount").Should().Be(750);
+    }
+
+    [Fact]
+    public void Extract_maps_alternative_country_field()
+    {
+        var result = _extractor.Extract("""{"nid":"X","country":"SE"}""");
+
+        result.Should().NotBeNull();
+        result!.Value<string>("countryCode").Should().Be("SE");
+    }
+}

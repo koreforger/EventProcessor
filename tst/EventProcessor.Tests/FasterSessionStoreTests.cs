@@ -200,8 +200,53 @@ public sealed class FasterSessionStoreTests : IDisposable
         _store.Count.Should().Be(1);
     }
 
+    [Fact]    public void DrainDirty_with_zero_max_returns_empty()
+    {
+        _store.Put("NID-A", new FraudSession { NID = "NID-A" });
+
+        var drained = _store.DrainDirty(0);
+
+        drained.Should().BeEmpty();
+        _store.DirtyCount.Should().Be(1); // still dirty
+    }
+
     [Fact]
-    public async Task Checkpoint_and_recover_restores_sessions()
+    public async Task RecoverAsync_with_no_checkpoint_starts_fresh()
+    {
+        // Point to an empty directory — no checkpoint exists.
+        var emptyDir = Path.Combine(_checkpointDir, "empty-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(emptyDir);
+
+        var options = Options.Create(new FraudEngineOptions
+        {
+            Processing = new ProcessingOptions
+            {
+                BucketCount = 4,
+                CheckpointDirectory = emptyDir,
+            },
+            Sessions = new SessionOptions { LookbackDays = 180 },
+        });
+        using var store = new FasterSessionStore(
+            options, new NullSessionRepository(), TestLogHelper.CreateLog<FasterSessionStore>());
+
+        // Should not throw — gracefully starts fresh.
+        await store.RecoverAsync();
+
+        store.Count.Should().Be(0);
+    }
+
+    [Fact]
+    public async Task EvictIdle_with_long_timeout_evicts_nothing()
+    {
+        await _store.GetOrCreateAsync("NID-RECENT");
+
+        var evicted = _store.EvictIdle(TimeSpan.FromHours(24));
+
+        evicted.Should().Be(0);
+        _store.Count.Should().Be(1);
+    }
+
+    [Fact]    public async Task Checkpoint_and_recover_restores_sessions()
     {
         var session = new FraudSession
         {

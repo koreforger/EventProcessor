@@ -190,6 +190,113 @@ public sealed class SimpleFraudRuleEngineTests
         engine.GetRules().Should().HaveCount(2);
     }
 
+    // ── Boundary value tests ────────────────────────────────────────
+
+    [Fact]
+    public void HighAmount_at_boundary_10000_does_not_match()
+    {
+        var engine = CreateEngine(
+            new RuleOptions { Name = "HighAmount", Expression = "", ScoreModifier = 0.3, Enabled = true });
+        var tx = new TransactionEvent { Amount = 10000m };
+        var session = new FraudSession();
+
+        var results = engine.Evaluate(tx, session);
+
+        results[0].IsMatch.Should().BeFalse();
+    }
+
+    [Fact]
+    public void VeryHighAmount_at_boundary_50000_does_not_match()
+    {
+        var engine = CreateEngine(
+            new RuleOptions { Name = "VeryHighAmount", Expression = "", ScoreModifier = 0.6, Enabled = true });
+        var tx = new TransactionEvent { Amount = 50000m };
+        var session = new FraudSession();
+
+        var results = engine.Evaluate(tx, session);
+
+        results[0].IsMatch.Should().BeFalse();
+    }
+
+    [Fact]
+    public void RapidTransactions_at_boundary_10_does_not_match()
+    {
+        var engine = CreateEngine(
+            new RuleOptions { Name = "RapidTransactions", Expression = "", ScoreModifier = 0.4, Enabled = true });
+        var tx = new TransactionEvent();
+        var session = new FraudSession { TransactionCount = 10 };
+
+        var results = engine.Evaluate(tx, session);
+
+        results[0].IsMatch.Should().BeFalse();
+    }
+
+    [Fact]
+    public void LargeSessionTotal_at_boundary_100000_does_not_match()
+    {
+        var engine = CreateEngine(
+            new RuleOptions { Name = "LargeSessionTotal", Expression = "", ScoreModifier = 0.7, Enabled = true });
+        var tx = new TransactionEvent();
+        var session = new FraudSession { TotalAmount = 100000m };
+
+        var results = engine.Evaluate(tx, session);
+
+        results[0].IsMatch.Should().BeFalse();
+    }
+
+    [Fact]
+    public void UnusualLocation_with_null_base_country_does_not_match()
+    {
+        var engine = CreateEngine(
+            new RuleOptions { Name = "UnusualLocation", Expression = "", ScoreModifier = 0.5, Enabled = true });
+        var tx = new TransactionEvent { CountryCode = "RU" };
+        var session = new FraudSession { BaseCountry = null };
+
+        var results = engine.Evaluate(tx, session);
+
+        results[0].IsMatch.Should().BeFalse();
+    }
+
+    [Fact]
+    public void UnusualLocation_with_empty_base_country_does_not_match()
+    {
+        var engine = CreateEngine(
+            new RuleOptions { Name = "UnusualLocation", Expression = "", ScoreModifier = 0.5, Enabled = true });
+        var tx = new TransactionEvent { CountryCode = "RU" };
+        var session = new FraudSession { BaseCountry = "" };
+
+        var results = engine.Evaluate(tx, session);
+
+        results[0].IsMatch.Should().BeFalse();
+    }
+
+    [Fact]
+    public void Evaluate_with_no_rules_returns_empty()
+    {
+        var engine = CreateEngine(); // no rules
+        var tx = new TransactionEvent { Amount = 99999m };
+        var session = new FraudSession();
+
+        var results = engine.Evaluate(tx, session);
+
+        results.Should().BeEmpty();
+    }
+
+    [Fact]
+    public void Evaluate_with_only_disabled_and_uncompiled_rules_returns_empty()
+    {
+        var engine = CreateEngine(
+            new RuleOptions { Name = "HighAmount", Expression = "", ScoreModifier = 0.3, Enabled = false },
+            new RuleOptions { Name = "CustomRule", Expression = "jex", ScoreModifier = 0.1, Enabled = true });
+        var tx = new TransactionEvent { Amount = 99999m };
+        var session = new FraudSession();
+
+        var results = engine.Evaluate(tx, session);
+
+        // Disabled is skipped, CustomRule has no compiled predicate so it's also skipped
+        results.Should().BeEmpty();
+    }
+
     // ── Test doubles ────────────────────────────────────────────────
 
     private sealed class FakeOptionsMonitor(FraudEngineOptions value) : IOptionsMonitor<FraudEngineOptions>

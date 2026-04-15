@@ -105,6 +105,7 @@ public sealed class TransactionConsumerWorker : BackgroundService
             .UseLoggerFactory(_loggerFactory);
 
         // Stage 0: null — no pipeline, no processing; measures raw Kafka throughput.
+#pragma warning disable CS0162 // Unreachable code — DiagnosticStage is a compile-time const switch
         if (DiagnosticStage == 0)
         {
             return base_
@@ -145,6 +146,7 @@ public sealed class TransactionConsumerWorker : BackgroundService
                     .UseStep(new FraudEvalStep(_ruleEngine, _sessionStore, _producer, fraudEvalLogger))
                     .Build())
             .Build();
+#pragma warning restore CS0162
     }
 
     public override async Task StopAsync(CancellationToken cancellationToken)
