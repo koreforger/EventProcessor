@@ -1,32 +1,39 @@
 using EventProcessor.Logging;
-using EventProcessor.Models;
 using EventProcessor.Services;
 using KF.Metrics;
-using Microsoft.Data.SqlClient;
 using Microsoft.Extensions.Options;
 
 namespace EventProcessor.Workers;
 
 /// <summary>
-/// Background service that periodically drains dirty sessions from the
-/// <see cref="ISessionStore"/> and persists them to SQL via the configured SqlSink.
+/// Background service that periodically:
+///   1. Drains dirty sessions (oldest-first) and saves them to SQL via <see cref="ISessionRepository"/>
+///   2. Evicts idle sessions from FASTER
+///   3. Takes periodic FASTER checkpoints for crash recovery
+/// On shutdown, performs a final flush + checkpoint to ensure no data is lost.
 /// </summary>
 internal sealed class FlushCoordinator : BackgroundService
 {
     private const string OpFlush = "session.flush";
+    private const string OpCheckpoint = "session.checkpoint";
+    private const string OpEvict = "session.evict";
 
     private readonly ISessionStore _store;
+    private readonly ISessionRepository _repository;
     private readonly IOptions<FraudEngineOptions> _options;
     private readonly EventProcessorLog<FlushCoordinator> _log;
     private readonly IOperationMonitor _monitor;
+    private int _flushCyclesSinceCheckpoint;
 
     public FlushCoordinator(
         ISessionStore store,
+        ISessionRepository repository,
         IOptions<FraudEngineOptions> options,
         EventProcessorLog<FlushCoordinator> log,
         IOperationMonitor monitor)
     {
         _store = store;
+        _repository = repository;
         _options = options;
         _log = log;
         _monitor = monitor;
@@ -34,101 +41,110 @@ internal sealed class FlushCoordinator : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        var flushOpts = _options.Value.Flush;
-        var interval = TimeSpan.FromMilliseconds(flushOpts.TimeBasedIntervalMs);
-        var countThreshold = flushOpts.CountThreshold;
+        var opts = _options.Value;
+        var flushInterval = TimeSpan.FromMilliseconds(opts.Flush.TimeBasedIntervalMs);
+        var countThreshold = opts.Flush.CountThreshold;
+        var idleTimeout = TimeSpan.FromMinutes(opts.Sessions.IdleTimeoutMinutes);
+        var archiveAfterDays = opts.Sessions.ArchiveAfterDays;
+        var checkpointEveryNCycles = opts.Sessions.CheckpointEveryFlushCycles;
+
+        // Recover from last checkpoint at startup.
+        try
+        {
+            await _store.RecoverAsync(stoppingToken);
+        }
+        catch (Exception ex)
+        {
+            _log.Session.Flush.Error.LogError(ex, "Failed to recover FASTER checkpoint at startup");
+        }
 
         _log.Session.Flush.Started.LogInformation(
-            "Flush coordinator started — interval={IntervalMs}ms, countThreshold={Count}",
-            flushOpts.TimeBasedIntervalMs, countThreshold);
+            "Flush coordinator started — interval={IntervalMs}ms, countThreshold={Count}, idleTimeout={Idle}min, archiveAfter={Archive}d",
+            opts.Flush.TimeBasedIntervalMs, countThreshold, opts.Sessions.IdleTimeoutMinutes, archiveAfterDays);
 
         while (!stoppingToken.IsCancellationRequested)
         {
             try
             {
-                await Task.Delay(interval, stoppingToken);
+                await Task.Delay(flushInterval, stoppingToken);
             }
             catch (OperationCanceledException)
             {
                 break;
             }
 
-            if (_store.DirtyCount == 0)
-                continue;
-
-            using var scope = _monitor.Begin(OpFlush);
-            try
+            // 1. Flush dirty sessions to SQL (oldest-first).
+            if (_store.DirtyCount > 0)
             {
-                var dirty = _store.DrainDirty(countThreshold);
-                if (dirty.Count > 0)
+                using var scope = _monitor.Begin(OpFlush);
+                try
                 {
-                    await FlushToSqlAsync(dirty, stoppingToken);
-                    _log.Session.Flush.Completed.LogInformation(
-                        "Flushed {Count} sessions to SQL (remaining dirty: {Remaining})",
-                        dirty.Count, _store.DirtyCount);
+                    var dirty = _store.DrainDirty(countThreshold);
+                    if (dirty.Count > 0)
+                    {
+                        await _repository.SaveBatchAsync(dirty, archiveAfterDays, stoppingToken);
+                        _log.Session.Flush.Completed.LogInformation(
+                            "Flushed {Count} sessions to SQL (remaining dirty: {Remaining})",
+                            dirty.Count, _store.DirtyCount);
+                    }
+                }
+                catch (OperationCanceledException)
+                {
+                    break;
+                }
+                catch (Exception ex)
+                {
+                    scope.MarkFailed();
+                    _log.Session.Flush.Error.LogError(ex,
+                        "Flush cycle failed — {DirtyCount} sessions still dirty", _store.DirtyCount);
                 }
             }
-            catch (OperationCanceledException)
+
+            // 2. Evict idle sessions.
+            using (_monitor.Begin(OpEvict))
             {
-                break;
+                _store.EvictIdle(idleTimeout);
             }
-            catch (Exception ex)
+
+            // 3. Periodic checkpoint.
+            _flushCyclesSinceCheckpoint++;
+            if (_flushCyclesSinceCheckpoint >= checkpointEveryNCycles)
             {
-                scope.MarkFailed();
-                _log.Session.Flush.Error.LogError(ex,
-                    "Flush cycle failed — {DirtyCount} sessions still dirty", _store.DirtyCount);
+                using (_monitor.Begin(OpCheckpoint))
+                {
+                    await _store.CheckpointAsync(stoppingToken);
+                }
+                _flushCyclesSinceCheckpoint = 0;
             }
         }
+
+        // Shutdown: final flush + checkpoint to guarantee no data loss.
+        await ShutdownFlushAsync();
     }
 
-    private async Task FlushToSqlAsync(
-        IReadOnlyList<(string Nid, FraudSession Session)> sessions,
-        CancellationToken ct)
+    private async Task ShutdownFlushAsync()
     {
-        var connectionString = _options.Value.SqlSink.ConnectionString;
-        if (string.IsNullOrEmpty(connectionString))
+        _log.Session.Flush.Started.LogInformation(
+            "Shutdown flush: draining all {DirtyCount} dirty sessions", _store.DirtyCount);
+
+        try
         {
-            _log.Session.Flush.Completed.LogDebug(
-                "No SQL sink configured — {Count} sessions drained without persistence", sessions.Count);
-            return;
+            // Drain everything remaining.
+            while (_store.DirtyCount > 0)
+            {
+                var dirty = _store.DrainDirty(_options.Value.Flush.CountThreshold);
+                if (dirty.Count == 0) break;
+                await _repository.SaveBatchAsync(dirty, _options.Value.Sessions.ArchiveAfterDays);
+            }
+
+            // Final checkpoint.
+            await _store.CheckpointAsync();
+
+            _log.Session.Flush.Completed.LogInformation("Shutdown flush and checkpoint completed");
         }
-
-        using var connection = new SqlConnection(connectionString);
-        await connection.OpenAsync(ct);
-
-        // Batch sessions into MERGE statements for upsert semantics.
-        // Schema assumed: [FraudEngine].[Sessions](NID, Status, TransactionCount, TotalAmount,
-        //   CurrentScore, BaseCountry, CreatedAt, LastActivityAt, DecisionType, DecidedAt)
-        foreach (var (nid, session) in sessions)
+        catch (Exception ex)
         {
-            using var cmd = connection.CreateCommand();
-            cmd.CommandTimeout = _options.Value.SqlSink.TimeoutSeconds;
-            cmd.CommandText = """
-                MERGE [FraudEngine].[Sessions] AS tgt
-                USING (SELECT @NID AS NID) AS src ON tgt.NID = src.NID
-                WHEN MATCHED THEN UPDATE SET
-                    Status = @Status, TransactionCount = @TxCount, TotalAmount = @TotalAmount,
-                    CurrentScore = @Score, BaseCountry = @Country, LastActivityAt = @LastActivity,
-                    DecisionType = @DecisionType, DecidedAt = @DecidedAt
-                WHEN NOT MATCHED THEN INSERT
-                    (NID, Status, TransactionCount, TotalAmount, CurrentScore, BaseCountry,
-                     CreatedAt, LastActivityAt, DecisionType, DecidedAt)
-                VALUES (@NID, @Status, @TxCount, @TotalAmount, @Score, @Country,
-                        @CreatedAt, @LastActivity, @DecisionType, @DecidedAt);
-                """;
-
-            cmd.Parameters.AddWithValue("@NID", nid);
-            cmd.Parameters.AddWithValue("@Status", (int)session.Status);
-            cmd.Parameters.AddWithValue("@TxCount", session.TransactionCount);
-            cmd.Parameters.AddWithValue("@TotalAmount", session.TotalAmount);
-            cmd.Parameters.AddWithValue("@Score", session.CurrentScore);
-            cmd.Parameters.AddWithValue("@Country", (object?)session.BaseCountry ?? DBNull.Value);
-            cmd.Parameters.AddWithValue("@CreatedAt", session.CreatedAt.UtcDateTime);
-            cmd.Parameters.AddWithValue("@LastActivity", session.LastActivityAt.UtcDateTime);
-            cmd.Parameters.AddWithValue("@DecisionType", session.Decision != null ? (int)session.Decision.Decision : 0);
-            cmd.Parameters.AddWithValue("@DecidedAt", session.Decision?.DecidedAt.UtcDateTime ?? (object)DBNull.Value);
-
-            await cmd.ExecuteNonQueryAsync(ct);
+            _log.Session.Flush.Error.LogError(ex, "Shutdown flush failed — some data may be lost");
         }
     }
 }

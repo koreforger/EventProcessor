@@ -24,11 +24,17 @@ public class SessionStoreBenchmarks
     [GlobalSetup]
     public void Setup()
     {
+        var checkpointDir = Path.Combine(Path.GetTempPath(), "EventProcessor", "bench", Guid.NewGuid().ToString("N"));
         var options = Options.Create(new FraudEngineOptions
         {
-            Processing = new ProcessingOptions { BucketCount = 64 },
+            Processing = new ProcessingOptions
+            {
+                BucketCount = 64,
+                CheckpointDirectory = checkpointDir,
+            },
+            Sessions = new SessionOptions { LookbackDays = 180 },
         });
-        _store = new FasterSessionStore(options, TestLogHelper.CreateLog<FasterSessionStore>());
+        _store = new FasterSessionStore(options, new NullRepo(), TestLogHelper.CreateLog<FasterSessionStore>());
 
         _nids = new string[SessionCount];
         for (int i = 0; i < SessionCount; i++)
@@ -38,23 +44,23 @@ public class SessionStoreBenchmarks
     [GlobalCleanup]
     public void Cleanup() => _store.Dispose();
 
-    [Benchmark(Description = "GetOrCreate (cold)")]
-    public void GetOrCreate_Cold()
+    [Benchmark(Description = "GetOrCreateAsync (cold)")]
+    public async Task GetOrCreate_Cold()
     {
         for (int i = 0; i < SessionCount; i++)
-            _store.GetOrCreate(_nids[i]);
+            await _store.GetOrCreateAsync(_nids[i]);
     }
 
-    [Benchmark(Description = "GetOrCreate (warm)")]
-    public void GetOrCreate_Warm()
+    [Benchmark(Description = "GetOrCreateAsync (warm)")]
+    public async Task GetOrCreate_Warm()
     {
         // Sessions already exist from previous benchmark iteration
         for (int i = 0; i < SessionCount; i++)
-            _store.GetOrCreate(_nids[i]);
+            await _store.GetOrCreateAsync(_nids[i]);
     }
 
-    [Benchmark(Description = "Put + GetOrCreate")]
-    public void Put_Then_Get()
+    [Benchmark(Description = "Put + GetOrCreateAsync")]
+    public async Task Put_Then_Get()
     {
         for (int i = 0; i < SessionCount; i++)
         {
@@ -67,7 +73,7 @@ public class SessionStoreBenchmarks
             _store.Put(_nids[i], session);
         }
         for (int i = 0; i < SessionCount; i++)
-            _store.GetOrCreate(_nids[i]);
+            await _store.GetOrCreateAsync(_nids[i]);
     }
 
     [Benchmark(Description = "DrainDirty (100)")]
@@ -158,4 +164,14 @@ public class RuleEngineBenchmarks
         public FraudEngineOptions Get(string? name) => value;
         public IDisposable? OnChange(Action<FraudEngineOptions, string?> listener) => null;
     }
+}
+
+file sealed class NullRepo : ISessionRepository
+{
+    public Task<FraudSession?> LoadAsync(string nid, int lookbackDays, CancellationToken ct = default)
+        => Task.FromResult<FraudSession?>(null);
+    public Task SaveAsync(string nid, FraudSession session, int archiveAfterDays, CancellationToken ct = default)
+        => Task.CompletedTask;
+    public Task SaveBatchAsync(IReadOnlyList<(string Nid, FraudSession Session)> sessions, int archiveAfterDays, CancellationToken ct = default)
+        => Task.CompletedTask;
 }

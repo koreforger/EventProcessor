@@ -53,6 +53,9 @@ public class ProcessingOptions
 
     /// <summary>Required — set in appsettings (not here). Validated at startup.</summary>
     public int BatchTimeoutMs { get; set; }
+
+    /// <summary>Directory for FASTER checkpoint files. Defaults to temp directory.</summary>
+    public string? CheckpointDirectory { get; set; }
 }
 
 public class FlushOptions
@@ -72,14 +75,23 @@ public class FlushOptions
 
 public class SessionOptions
 {
-    /// <summary>Required — validated at startup.</summary>
-    public int IdleTimeoutMinutes { get; set; }
+    /// <summary>Sessions idle longer than this are evicted from FASTER (default: 40 min).</summary>
+    public int IdleTimeoutMinutes { get; set; } = 40;
 
     /// <summary>Required — validated at startup.</summary>
     public int MaxTransactionsPerSession { get; set; }
 
     /// <summary>Required — validated at startup.</summary>
     public int MaxSessionDurationMinutes { get; set; }
+
+    /// <summary>When the current slab spans more than this many days, the oldest month is archived (default: 120).</summary>
+    public int ArchiveAfterDays { get; set; } = 120;
+
+    /// <summary>On cache miss, load this many days of history from SQL (default: 180).</summary>
+    public int LookbackDays { get; set; } = 180;
+
+    /// <summary>Take a FASTER checkpoint every N flush cycles (default: 6, i.e. every ~30s at 5s interval).</summary>
+    public int CheckpointEveryFlushCycles { get; set; } = 6;
 }
 
 public class ScoringOptions

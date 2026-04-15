@@ -46,26 +46,23 @@ internal sealed class FraudEvalStep : IPipelineStep<JObject, FraudDecision>
         };
 
         // 1. Load or create session from FASTER (bucket-routed by NID hash).
-        var session = _sessionStore.GetOrCreate(tx.NID);
+        //    On cache miss, loads from SQL (cache-through).
+        var session = await _sessionStore.GetOrCreateAsync(tx.NID);
 
         // 2. Accumulate transaction into session state.
         session.TransactionCount++;
         session.TotalAmount += tx.Amount;
         session.LastActivityAt = DateTimeOffset.UtcNow;
         session.BaseCountry ??= tx.CountryCode;
+        session.EarliestTransactionAt ??= tx.Timestamp;
 
-        session.RecentTransactions.Add(new TransactionRecord
+        session.Transactions.Add(new TransactionRecord
         {
             TransactionId = tx.TransactionId,
             Amount = tx.Amount,
             Timestamp = tx.Timestamp,
             CountryCode = tx.CountryCode,
         });
-
-        // Keep recent transactions bounded to avoid unbounded growth.
-        const int maxRecent = 100;
-        if (session.RecentTransactions.Count > maxRecent)
-            session.RecentTransactions.RemoveRange(0, session.RecentTransactions.Count - maxRecent);
 
         // 3. Evaluate fraud rules against current transaction + session state.
         var results = _ruleEngine.Evaluate(tx, session);

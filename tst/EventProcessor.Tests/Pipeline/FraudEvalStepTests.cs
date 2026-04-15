@@ -87,7 +87,7 @@ public sealed class FraudEvalStepTests : IDisposable
             await _step.InvokeAsync(extracted, new PipelineContext(), default);
         }
 
-        var session = _sessionStore.GetOrCreate(nid);
+        var session = await _sessionStore.GetOrCreateAsync(nid);
         session.TransactionCount.Should().Be(3);
         session.TotalAmount.Should().Be(300m);
     }
@@ -105,7 +105,7 @@ public sealed class FraudEvalStepTests : IDisposable
 
         await _step.InvokeAsync(extracted, new PipelineContext(), default);
 
-        var session = _sessionStore.GetOrCreate("NID-COUNTRY");
+        var session = await _sessionStore.GetOrCreateAsync("NID-COUNTRY");
         session.BaseCountry.Should().Be("NO");
     }
 
@@ -142,17 +142,17 @@ public sealed class FraudEvalStepTests : IDisposable
     }
 
     [Fact]
-    public async Task Recent_transactions_bounded_at_100()
+    public async Task Transactions_grow_unbounded_as_lifetime_history()
     {
-        var nid = "NID-BOUNDED";
+        var nid = "NID-LIFETIME";
         for (int i = 0; i < 110; i++)
         {
             var extracted = JObject.FromObject(new { nid, transactionId = $"TX-{i}", amount = 1m });
             await _step.InvokeAsync(extracted, new PipelineContext(), default);
         }
 
-        var session = _sessionStore.GetOrCreate(nid);
-        session.RecentTransactions.Count.Should().BeLessThanOrEqualTo(100);
+        var session = await _sessionStore.GetOrCreateAsync(nid);
+        session.Transactions.Count.Should().Be(110);
     }
 
     // ── Test doubles ────────────────────────────────────────────────
@@ -187,12 +187,12 @@ public sealed class FraudEvalStepTests : IDisposable
     private sealed class FakeSessionStore : ISessionStore
     {
         private readonly Dictionary<string, FraudSession> _sessions = new();
-        private readonly HashSet<string> _dirty = new();
+        private readonly Dictionary<string, DateTimeOffset> _dirty = new();
 
-        public FraudSession GetOrCreate(string nid)
+        public ValueTask<FraudSession> GetOrCreateAsync(string nid)
         {
             if (_sessions.TryGetValue(nid, out var existing))
-                return existing;
+                return new ValueTask<FraudSession>(existing);
 
             var session = new FraudSession
             {
@@ -202,17 +202,21 @@ public sealed class FraudEvalStepTests : IDisposable
                 LastActivityAt = DateTimeOffset.UtcNow,
             };
             _sessions[nid] = session;
-            return session;
+            return new ValueTask<FraudSession>(session);
         }
 
         public void Put(string nid, FraudSession session)
         {
             _sessions[nid] = session;
-            _dirty.Add(nid);
+            _dirty[nid] = DateTimeOffset.UtcNow;
         }
 
         public IReadOnlyList<(string Nid, FraudSession Session)> DrainDirty(int maxCount) =>
-            _dirty.Take(maxCount).Select(n => (n, _sessions[n])).ToList();
+            _dirty.OrderBy(kv => kv.Value).Take(maxCount).Select(kv => (kv.Key, _sessions[kv.Key])).ToList();
+
+        public int EvictIdle(TimeSpan idleTimeout) => 0;
+        public Task CheckpointAsync(CancellationToken ct = default) => Task.CompletedTask;
+        public Task RecoverAsync(CancellationToken ct = default) => Task.CompletedTask;
 
         public long Count => _sessions.Count;
         public long DirtyCount => _dirty.Count;

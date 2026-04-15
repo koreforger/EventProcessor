@@ -26,7 +26,8 @@ flowchart LR
         FLUSH["Flush Coordinator\n(background timer)"]
     end
 
-    FASTER["FASTER\nIn-Memory Session Store"]
+    FASTER["FASTER\nDurable Session Cache"]
+    DISK["Checkpoint\n(local disk)"]
     SQL["SQL Server\n(permanent storage)"]
 
     IN --> DECODE --> JEX --> EVAL --> CUSTOM
@@ -35,8 +36,10 @@ flowchart LR
     EVAL -- "③ write session back" --> FASTER
 
     EVAL -- "④ publish JSON\ndecision" --> OUT
-    FASTER -. "periodic\nbatch save" .-> FLUSH
+    FASTER -. "periodic flush\n(oldest-dirty-first)" .-> FLUSH
     FLUSH --> SQL
+    SQL -. "cache-through\n(on miss)" .-> FASTER
+    FASTER -. "checkpoint /\nrecover" .-> DISK
 
     style JEX fill:#e8f5e9,stroke:#388e3c
     style EVAL fill:#e8f5e9,stroke:#388e3c
@@ -45,9 +48,9 @@ flowchart LR
 
 > **Green boxes (🔧) are extensibility points** — they are where you plug in your own behaviour without modifying the framework code. The dashed box represents optional additional pipeline steps you can insert.
 
-**Why FASTER exists:** It is a shared memory cache that accumulates transaction history per customer. When a new transaction arrives, Step 3 **reads** that customer's session **from FASTER** first — that's how it knows the customer already spent 45,000 NOK in 3 previous transactions. After scoring, it **writes** the updated session (now 100,000 NOK across 4 transactions) **back to FASTER** so the *next* transaction for that customer will see the full picture. Without FASTER, every transaction would be evaluated in isolation with no knowledge of what came before.
+**Why FASTER exists:** It is a durable in-memory cache that accumulates the full transaction history per customer. When a new transaction arrives, Step 3 **reads** that customer's session **from FASTER** first — that's how it knows the customer already spent 45,000 NOK in 3 previous transactions. After scoring, it **writes** the updated session (now 100,000 NOK across 4 transactions) **back to FASTER** so the *next* transaction for that customer will see the full picture. Without FASTER, every transaction would be evaluated in isolation with no knowledge of what came before.
 
-The SQL flush is secondary — it runs on a background timer to copy sessions to permanent storage for reporting and durability. It is **not** part of the real-time processing loop.
+If a session isn't in FASTER (e.g., after the service restarts or if it was evicted for being idle), the system automatically **loads it from SQL** (cache-through) so no history is ever lost. The SQL flush runs on a background timer in **oldest-dirty-first** order; FASTER also **checkpoints to local disk** periodically for crash recovery.
 
 ---
 
@@ -88,7 +91,7 @@ Every customer (identified by NID) has a *session* — a running record of their
 - Increment the transaction count
 - Add the amount to the running total
 - Record the country (if this is the first transaction, it becomes the customer's "base country")
-- Add the transaction to the recent transaction list (capped at 100 entries)
+- Add the transaction to the full lifetime transaction list
 
 **3c. Run the fraud rules**
 
@@ -147,7 +150,8 @@ FASTER is a high-performance key-value store from Microsoft Research. We use it 
 | Last activity | Timestamp of most recent transaction |
 | Transaction count | How many transactions in this session |
 | Total amount | Sum of all transaction amounts |
-| Recent transactions | List of the last 100 transactions (ID, amount, time, country) |
+| Transactions | Full lifetime transaction list (ID, amount, time, country) |
+| Earliest transaction at | When the oldest transaction in the current slab occurred (used for archival decisions) |
 | Base country | The country from the customer's first transaction |
 | Current fraud score | Latest calculated score |
 | Triggered rules | Which rules matched on the last evaluation |
@@ -165,32 +169,61 @@ The key benefit: **different cabinets can be accessed simultaneously**. If two t
 
 ### What happens when the service shuts down?
 
-**The in-memory data in FASTER is lost.** This is by design — FASTER is a speed-optimized cache, not permanent storage.
+**No data is lost.** On shutdown the service:
 
-However, the **Flush Coordinator** continuously saves changed sessions to SQL Server in the background (every few seconds). So in practice:
+1. **Flushes every remaining dirty session** to SQL Server
+2. **Takes a FASTER checkpoint** to local disk
 
-- Sessions that were updated **more than a few seconds before shutdown** are safely in SQL
-- Sessions that were updated **in the last few seconds** may be lost
-
-For a fraud detection system, this trade-off is acceptable: the worst case is that a few customers get a "fresh start" on their session when the service restarts, which biases toward *more permissive* (Allow) rather than blocking legitimate activity.
+This means both SQL and the local checkpoint contain the full, up-to-date state.
 
 ### What happens at startup?
 
-**Currently:** The in-memory store starts empty. Sessions are created fresh as new transactions arrive. This means the system needs a brief warm-up period — during the first few minutes, session-based rules (like "rapid transactions" or "large session total") may not fire because the system hasn't accumulated enough history yet.
+**Full recovery.** The service:
 
-**Planned improvement (see Roadmap):** On startup, load existing sessions from SQL back into FASTER so the system resumes with full history. This is a high-priority item for production readiness.
+1. **Recovers the FASTER checkpoint** from local disk — this restores the in-memory hash index in milliseconds, so sessions that were in memory before shutdown are immediately available again
+2. **Rebuilds internal tracking maps** (dirty timestamps, last-activity timestamps) by scanning the recovered log
+3. Begins consuming transactions — there is no warm-up gap
+
+If a session is not in FASTER (e.g., it was evicted for being idle, or the checkpoint is missing), the system loads it **on demand from SQL** as part of the cache-through pattern. This means the service is **fully operational from the first transaction after startup**, even after a crash where no clean shutdown checkpoint was taken.
+
+### Idle Eviction
+
+Sessions that have not been accessed for a configurable period (default: **40 minutes**) are automatically evicted from FASTER to free memory. Eviction skips any session that still has unsaved (dirty) changes — those are flushed to SQL first on the next flush cycle, then evicted on the following eviction pass.
+
+If an evicted session is needed again (a new transaction arrives for that NID), the cache-through mechanism loads it back from SQL transparently.
 
 ---
 
 ## The Flush Coordinator — Saving to SQL
 
-The Flush Coordinator runs on a timer in the background, separate from transaction processing. Every few seconds (configurable), it:
+The Flush Coordinator runs on a timer in the background, separate from transaction processing. On each cycle it performs three jobs:
 
-1. Checks if any sessions have changed since the last flush
-2. Gathers a batch of changed sessions (up to a configurable limit)
-3. Writes them to SQL Server using upsert logic (insert if new, update if existing)
+### 1. Flush Dirty Sessions (oldest-dirty-first)
 
-This means SQL is **eventually consistent** — it reflects the state of sessions from a few seconds ago, not the exact current instant. For dashboards and reporting this is perfectly fine; for real-time fraud decisions the service uses the in-memory store.
+Sessions that have been modified are saved to SQL in **oldest-dirty-first order** — the session that has been waiting longest to be saved goes first. This ensures that no session sits unsaved for an unbounded time, even under sustained high throughput.
+
+Sessions are saved via the **Session Repository**, which uses MERGE (upsert) logic to insert new rows or update existing ones.
+
+### 2. Evict Idle Sessions
+
+After flushing, the coordinator evicts sessions that have been idle longer than the configured timeout (default 40 minutes). This keeps the memory footprint bounded without losing any data — evicted sessions will be loaded back from SQL on demand if needed.
+
+### 3. Periodic Checkpoint
+
+Every N flush cycles (default: 6), the coordinator triggers a FASTER checkpoint to local disk. This is a safety net — if the process crashes between checkpoints, the last checkpoint plus the SQL data together contain all history.
+
+### Time-Slabbed Archival
+
+Session data in SQL is organized into **time slabs**. Each customer (NID) has a "current" slab that grows as new transactions arrive. When the span of transactions in the current slab exceeds a configurable threshold (default: **120 days**), the oldest month of data is sliced off into a separate **archive slab** row (keyed by `yyyy-MM`).
+
+When loading a session, the system reads the current slab plus any archive slabs within the **lookback window** (default: **180 days**) and merges them into a single session. On save, only the current slab is written — archive slabs are immutable once created.
+
+This design means:
+- The "current" slab stays small and fast to serialize
+- Historical data is preserved indefinitely with minimal overhead
+- The lookback window is configurable per deployment — increase it for deeper history, decrease it for faster loads
+
+SQL is **eventually consistent** — it reflects the state of sessions from a few seconds ago, not the exact current instant. For dashboards and reporting this is perfectly fine; for real-time fraud decisions the service uses the in-memory store.
 
 ---
 
@@ -234,11 +267,11 @@ This means: if fraud patterns shift, the team can adjust thresholds immediately 
 
 ## Testing
 
-The system has **54 automated tests** covering:
+The system has **58 automated tests** covering:
 
-- **Session store** (9 tests): Creating, reading, updating, and flushing sessions; verifying bucket routing distributes evenly
+- **Session store** (13 tests): Creating, reading, updating, and flushing sessions; verifying bucket routing distributes evenly; oldest-dirty-first drain ordering; idle eviction (stale sessions removed, dirty sessions skipped); checkpoint-and-recover round-trip; cache-through loading from SQL on miss
 - **Fraud rules** (12 tests): Each of the 5 rules tested individually; disabled rules are skipped; rules reload when configuration changes
-- **Full pipeline** (8 tests): End-to-end processing of transactions through all three steps; verifying session accumulation, country detection, and decision output
+- **Full pipeline** (8 tests): End-to-end processing of transactions through all three steps; verifying session accumulation, country detection, decision output, and unbounded lifetime transaction history
 - **Configuration validation** (10 tests): All required settings verified at startup; the service refuses to start with invalid configuration
 - **Health checks** (8 tests): Health endpoints correctly reflect the state of each dependency
 - **Field extraction** (4 tests): Valid and invalid input handling
@@ -304,6 +337,7 @@ Every major component is registered behind an interface. You can replace any of 
 |-----------|---------|--------------------|
 | `IFraudRuleEngine` | `SimpleFraudRuleEngine` | You want completely different rule logic |
 | `ISessionStore` | `FasterSessionStore` | You want a different storage backend (Redis, etc.) |
+| `ISessionRepository` | `SqlSessionRepository` | You want a different persistent store for session slabs (e.g., Cosmos DB, PostgreSQL) |
 | `IFraudDecisionProducer` | `KafkaFraudDecisionProducer` | You want to publish decisions somewhere other than Kafka |
 
 The built-in `NoOpFraudDecisionProducer` is an example — it's a drop-in replacement that discards all decisions, useful for testing or dry-run deployments.
@@ -320,39 +354,34 @@ All operational parameters are externalized in the `FraudEngine` config section 
 
 ## Current Status — What's Done, What's Not
 
-The core processing pipeline is **functionally complete**: transactions flow in, sessions accumulate, rules fire, decisions are published. The system works end-to-end in a development environment with Docker Compose (Redpanda for Kafka, Azure SQL Edge for the database).
+The core processing pipeline is **functionally complete and durable**: transactions flow in, sessions accumulate with full lifetime history, rules fire, decisions are published as JSON. The session layer is crash-safe — FASTER checkpoints to local disk, sessions are flushed to SQL in oldest-dirty-first order, and the cache-through pattern means no data is lost on restart or eviction.
 
-However, there are important gaps before this is production-ready. The next section lays these out.
+Key capabilities now implemented:
+- **Session durability** — checkpoint/recover on startup and shutdown
+- **Cache-through** — sessions loaded from SQL on demand when not in FASTER
+- **Idle eviction** — sessions removed after 40 minutes of inactivity to bound memory
+- **Time-slabbed archival** — old transaction data archived to monthly SQL slabs, configurable lookback depth
+- **JSON output** — decisions published as standard JSON (camelCase, string enums)
+
+The system works end-to-end in a development environment with Docker Compose (Redpanda for Kafka, Azure SQL Edge for the database).
 
 ---
 
 ## Roadmap — Prioritized Plan
 
-### Priority 1 — Required for Production
+### ~~Priority 1 — Required for Production~~ ✅ Complete
 
-#### 1a. Session Eviction
+#### ✅ 1a. Session Eviction — Implemented
 
-**What:** Automatically remove old sessions from the in-memory store when they are no longer needed.
+Sessions idle for longer than the configured timeout (default 40 minutes) are automatically evicted from FASTER. Dirty sessions are flushed first, then evicted on the next pass. Memory is bounded.
 
-**Why this is critical:** Without eviction, the in-memory store grows without bound. Every unique NID that transacts creates a session that stays in memory forever. In a production environment with millions of customers, this will eventually exhaust the 256 MB memory budget and crash the service.
+#### ✅ 1b. Durable Session Recovery — Implemented
 
-**What needs to happen:**
-- Sessions idle for longer than the configured timeout (e.g., 30 minutes of no activity) should be flushed to SQL and then removed from memory
-- Sessions that exceed a maximum duration (e.g., 24 hours) should be forcibly closed
-- Sessions that exceed a maximum transaction count should be closed and a new one started
+On startup, FASTER recovers from its last checkpoint (local disk). On cache miss at runtime, sessions are loaded from SQL via the cache-through pattern. There is no warm-up gap — the service is fully operational from the first transaction.
 
-The configuration settings for these thresholds already exist (`Sessions.IdleTimeoutMinutes`, `Sessions.MaxTransactionsPerSession`, `Sessions.MaxSessionDurationMinutes`) — they just aren't enforced yet.
+#### ✅ 1c. Time-Slabbed Archival — Implemented
 
-#### 1b. Cold-Start Session Recovery
-
-**What:** When the service starts up, load recent sessions from SQL back into the in-memory store.
-
-**Why this is critical:** Without this, every restart means losing all session history. The service needs a warm-up period of minutes or hours before session-based rules (rapid transactions, large totals) become effective. During that window, certain types of fraud will not be detected.
-
-**What needs to happen:**
-- On startup, query SQL for sessions that were active within the last N minutes
-- Load them into FASTER before the Kafka consumer starts processing
-- Only then begin consuming transactions
+Session data is organized into monthly archive slabs in SQL. The current slab holds ~4 months of transactions; when it exceeds the threshold, the oldest month is archived to a separate row. Lookback depth is configurable (default 180 days).
 
 ### Priority 2 — Important for Operations
 
@@ -405,7 +434,8 @@ All settings live under the `FraudEngine` section:
       "ConsumerThreads": 8,
       "BucketCount": 64,
       "MaxBatchSize": 500,
-      "BatchTimeoutMs": 100
+      "BatchTimeoutMs": 100,
+      "CheckpointDirectory": null
     },
     "Flush": {
       "TimeBasedIntervalMs": 5000,
@@ -414,9 +444,12 @@ All settings live under the `FraudEngine` section:
       "MemoryPressureThreshold": 0.85
     },
     "Sessions": {
-      "IdleTimeoutMinutes": 30,
+      "IdleTimeoutMinutes": 40,
       "MaxTransactionsPerSession": 10000,
-      "MaxSessionDurationMinutes": 1440
+      "MaxSessionDurationMinutes": 1440,
+      "ArchiveAfterDays": 120,
+      "LookbackDays": 180,
+      "CheckpointEveryFlushCycles": 6
     },
     "Scoring": {
       "BaseScore": 0.0,

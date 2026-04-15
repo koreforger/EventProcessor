@@ -36,7 +36,10 @@ public static class ServiceCollectionExtensions
         // JEX-based field extractor
         services.AddSingleton<JexFieldExtractorService>();
 
-        // FASTER-backed session store (in-memory, flushed to SQL by FlushCoordinator)
+        // SQL-backed session repository (slab storage)
+        services.AddSingleton<ISessionRepository, SqlSessionRepository>();
+
+        // FASTER-backed session store (durable, cache-through from SQL)
         services.AddSingleton<ISessionStore, FasterSessionStore>();
 
         // Fraud decision Kafka producer (interface-based, on/off toggle)

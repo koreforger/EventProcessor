@@ -4,6 +4,8 @@ namespace EventProcessor.Models;
 
 /// <summary>
 /// Per-NID fraud session state stored in FASTER.
+/// Contains a complete lifetime history of compact transaction records.
+/// Serialized with MessagePack for both FASTER internal storage and SQL varbinary persistence.
 /// </summary>
 [MessagePackObject]
 public sealed class FraudSession
@@ -26,8 +28,12 @@ public sealed class FraudSession
     [Key(5)]
     public decimal TotalAmount { get; set; }
 
+    /// <summary>
+    /// Complete lifetime transaction history — compact records, no cap.
+    /// Older entries may be archived to separate SQL slabs.
+    /// </summary>
     [Key(6)]
-    public List<TransactionRecord> RecentTransactions { get; set; } = new();
+    public List<TransactionRecord> Transactions { get; set; } = new();
 
     [Key(7)]
     public Dictionary<string, double> FeatureVector { get; set; } = new();
@@ -43,6 +49,12 @@ public sealed class FraudSession
 
     [Key(11)]
     public string? BaseCountry { get; set; }
+
+    /// <summary>
+    /// Earliest transaction timestamp in this session (used for slab archival decisions).
+    /// </summary>
+    [Key(12)]
+    public DateTimeOffset? EarliestTransactionAt { get; set; }
 }
 
 public enum SessionStatus
