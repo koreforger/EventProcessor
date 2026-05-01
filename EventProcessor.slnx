@@ -1,0 +1,8 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/EventProcessor/EventProcessor.csproj" />
+  </Folder>
+  <Folder Name="/tst/">
+    <Project Path="tst/EventProcessor.Tests/EventProcessor.Tests.csproj" />
+  </Folder>
+</Solution>
