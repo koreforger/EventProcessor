@@ -1,4 +1,4 @@
-using KF.Logging;
+using KoreForge.Logging;
 
 namespace EventProcessor.Logging;
 

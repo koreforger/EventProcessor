@@ -3,10 +3,10 @@ using EventProcessor.Logging;
 using EventProcessor.Monitoring;
 using EventProcessor.Rules;
 using EventProcessor.Session;
-using KF.Kafka.Consumer.Abstractions;
-using KF.Kafka.Consumer.Batch;
+using KoreForge.Kafka.Consumer.Abstractions;
+using KoreForge.Kafka.Consumer.Batch;
 using Event.Streaming.Processing.Monitoring;
-using KF.Time;
+using KoreForge.Time;
 
 namespace EventProcessor.Kafka;
 

@@ -4,7 +4,7 @@ using Microsoft.Extensions.Configuration;
 namespace EventProcessor.Seek;
 
 /// <summary>
-/// Reads seek configuration from IConfiguration (KFSettings SQL-backed provider).
+/// Reads seek configuration from IConfiguration (KoreForgeSettings SQL-backed provider).
 /// Setting keys: EventProcessor:Seek:Mode, EventProcessor:Seek:StartOffsetOrTimestamp, EventProcessor:Seek:StopOffsetOrTimestamp
 /// </summary>
 public sealed class SqlConsumerSeekOptionsProvider : IConsumerSeekOptionsProvider

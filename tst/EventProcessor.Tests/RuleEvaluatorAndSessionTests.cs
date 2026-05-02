@@ -1,6 +1,6 @@
 using EventProcessor.Rules;
 using EventProcessor.Session;
-using KF.Time;
+using KoreForge.Time;
 
 namespace EventProcessor.Tests;
 

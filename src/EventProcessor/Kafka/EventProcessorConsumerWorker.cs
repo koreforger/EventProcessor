@@ -1,7 +1,7 @@
 using EventProcessor.Logging;
-using KF.Kafka.Configuration.Factory;
-using KF.Kafka.Consumer.Hosting;
-using KF.Metrics;
+using KoreForge.Kafka.Configuration.Factory;
+using KoreForge.Kafka.Consumer.Hosting;
+using KoreForge.Metrics;
 
 namespace EventProcessor.Kafka;
 
